@@ -1,7 +1,7 @@
 # 拷贝漫画阅读器
 
-`拷贝漫画阅读器` 是使用 Flutter 编写的 Android、iPhone 和 iPad 漫画库
-管理与阅读应用。当前版本为 **0.3.16+24**。
+`拷贝漫画阅读器` 是使用 Flutter 编写的 Android、iPhone、iPad 和 macOS
+漫画库管理与阅读应用。当前版本为 **0.4.0+25**。
 
 它直接使用桌面端整理后的“漫画文件夹 + 章节 ZIP + SQLite 总索引”格式，
 可以在电脑、Android、iPhone 和 iPad 之间搬运同一套漫画库，不需要转换成
@@ -55,7 +55,7 @@
 
 ### 界面
 
-- 手机使用底部导航，平板宽屏自动使用侧边导航。
+- 手机使用底部导航，平板和 Mac 宽屏自动使用侧边导航。
 - 白色、米白色、浅灰色和深灰色主题。
 - 深色模式支持跟随系统、始终浅色和始终深色。
 - 所有较长说明集中在“我的 → 设置与说明”。
@@ -65,6 +65,7 @@
 ```text
 漫画/
 ├── 拷贝漫画总索引.db
+├── 拷贝漫画阅读器应用数据.db          可选的跨设备应用数据备份
 ├── 漫画名 - 作者/
 │   ├── 漫画名 - 作者 - 汇总.jpg
 │   ├── 漫画名 - 作者 - 第001话.zip
@@ -83,20 +84,27 @@
   `/storage/emulated/0/Android/data/com.othbradar.copymangareader/files/漫画`
 - iPhone / iPad：
   “文件”App →“我的 iPhone / iPad”→“拷贝漫画阅读器”→`漫画`
+- macOS 沙盒默认目录：
+  `~/Library/Containers/com.othbradar.copymangareader.macos/Data/Documents/漫画`
+  （日常使用建议在设置中选择用户自己的漫画库目录）
 
 ## 两个 SQLite 数据库
 
 | 数据库 | 作用 | 是否随漫画库搬运 |
 | --- | --- | --- |
 | `拷贝漫画总索引.db` | 漫画、作者、来源、章节分组、章节 ZIP 相对路径和共享下载索引 | 是 |
-| `copy_manga_reader_local.db` | 阅读进度、最近观看、收藏缓存、详情缓存、下载任务、简繁搜索索引和设置 | 否，只留在当前设备 |
+| `copy_manga_reader_local.db` | 阅读进度、最近观看、收藏缓存、详情缓存、下载任务、简繁搜索索引和设置 | 默认只留在当前设备 |
+| `拷贝漫画阅读器应用数据.db` | 由设置页显式导出的可携式应用数据快照，导入时映射到新设备的当前漫画库 | 是，可选 |
 
 外置库首次选择时，`拷贝漫画总索引.db` 会复制到应用支持目录成为本机工作
 索引。这样拔盘或系统文件授权变化不会损坏外置盘中的原始索引。
 
+应用数据迁移不会改共享总索引。登录令牌、密码和 Android/iOS/macOS 的系统目录
+授权不会写入可携式备份，需要在新设备重新选择目录并登录。
+
 ## 快速开始
 
-1. 安装 APK，或签名后安装适合当前设备 Bundle ID 的 IPA。
+1. 安装 APK、签名后的 IPA，或打开 macOS Release `.app`。
 2. 将完整 `漫画` 文件夹复制到默认位置；也可以先不复制，在设置中直接选择
    USB 外置盘上的漫画目录。
 3. 启动应用，等待 SQLite 索引和简繁搜索索引载入。
@@ -126,6 +134,7 @@ dart analyze --fatal-infos
 flutter test --concurrency=1
 flutter build apk --release --no-pub
 flutter build ios --release --no-codesign --no-pub
+flutter build macos --release --no-pub
 ```
 
 发布前必须至少通过严格静态检查和完整测试。真实漫画库与真实 ZIP 测试默认跳过，
@@ -153,6 +162,7 @@ test/               单元、组件、协议和数据库回归测试
 tool/               漫画库迁移、补索引和 JXL 转换工具
 android/            Android 平台桥接与构建配置
 ios/                iOS/iPadOS 平台桥接与构建配置
+macos/              macOS 安全书签、窗口与构建配置
 ```
 
 ## 第三方数据与发布产物

@@ -7,6 +7,7 @@ import '../controllers/appearance_controller.dart';
 import '../controllers/download_controller.dart';
 import '../controllers/favorites_controller.dart';
 import '../controllers/library_controller.dart';
+import '../controllers/reading_history_controller.dart';
 import '../controllers/session_controller.dart';
 import '../services/copy_api_protocol.dart';
 import '../services/copy_client.dart';
@@ -22,6 +23,7 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   bool _refreshingApiDomains = false;
   bool _refreshingAuthenticationDomains = false;
+  bool _transferringAppData = false;
 
   @override
   Widget build(BuildContext context) {
@@ -118,6 +120,50 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 16),
           _Section(
+            title: '应用数据迁移',
+            children: [
+              ListTile(
+                enabled:
+                    library.ready && !library.loading && !_transferringAppData,
+                leading: const Icon(Icons.upload_file_outlined),
+                title: const Text('导出到当前漫画库'),
+                subtitle: const Text('生成“拷贝漫画阅读器应用数据.db”，可随漫画库复制到其他设备'),
+                trailing: _transferringAppData
+                    ? const SizedBox.square(
+                        dimension: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2.5),
+                      )
+                    : const Icon(Icons.chevron_right),
+                onTap:
+                    library.ready && !library.loading && !_transferringAppData
+                    ? () => _exportAppData(context, library)
+                    : null,
+              ),
+              const Divider(height: 1),
+              ListTile(
+                enabled:
+                    library.ready && !library.loading && !_transferringAppData,
+                leading: const Icon(Icons.download_for_offline_outlined),
+                title: const Text('从当前漫画库导入'),
+                subtitle: const Text('合并阅读记录、设置、详情与收藏缓存、下载任务'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap:
+                    library.ready && !library.loading && !_transferringAppData
+                    ? () => _importAppData(context, library)
+                    : null,
+              ),
+              const Divider(height: 1),
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  '应用数据使用独立 SQLite 文件迁移，不修改“拷贝漫画总索引.db”。'
+                  '登录令牌、密码和系统目录授权不会导出，需要在新设备重新登录并选择漫画库。',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _Section(
             title: '拷贝漫画',
             children: [
               ListTile(
@@ -200,8 +246,11 @@ class _SettingsPageState extends State<SettingsPage> {
                 padding: const EdgeInsets.all(16),
                 child: Text(
                   Platform.isIOS
-                      ? '点“保存位置”可直接选择 iPad 外置盘上的“漫画”文件夹。'
+                      ? '点“保存位置”可直接选择 iPhone、iPad 或外置盘上的“漫画”文件夹。'
                             '外部总索引首次选择时复制到本机操作，外置索引保持不变。'
+                      : Platform.isMacOS
+                      ? '点“保存位置”可选择 Mac 内置盘或外置盘上的“漫画”文件夹。'
+                            '系统会保存长期访问授权；外部总索引复制到本机操作，原索引保持不变。'
                       : '点“保存位置”可选择安卓内部存储或 USB 外置盘上的“漫画”文件夹。'
                             '外部总索引首次选择时复制到本机操作，外置索引保持不变。',
                 ),
@@ -227,6 +276,129 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
     );
+  }
+
+  Future<void> _exportAppData(
+    BuildContext context,
+    LibraryController library,
+  ) async {
+    if (_transferringAppData) return;
+    final downloads = context.read<DownloadController>();
+    final wasPaused = downloads.globalPaused;
+    setState(() => _transferringAppData = true);
+    try {
+      await downloads.pauseAll();
+      final result = await library.exportPortableAppData();
+      if (!wasPaused) await downloads.resumeAll();
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '已导出 ${result.totalRows} 条应用数据到\n'
+            '${library.portableAppDataBackupFile.path}',
+          ),
+        ),
+      );
+    } catch (exception) {
+      if (!wasPaused) await downloads.resumeAll();
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('应用数据导出失败：$exception')));
+    } finally {
+      if (mounted) setState(() => _transferringAppData = false);
+    }
+  }
+
+  Future<void> _importAppData(
+    BuildContext context,
+    LibraryController library,
+  ) async {
+    if (_transferringAppData) return;
+    final backup = library.portableAppDataBackupFile;
+    if (!await backup.exists()) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('当前漫画库中没有 ${backup.uri.pathSegments.last}')),
+      );
+      return;
+    }
+    if (!context.mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('导入应用数据'),
+        content: const Text(
+          '备份会合并到本机独立数据库；相同记录以备份为准。'
+          '下载中的任务会转为暂停，不会自动开始。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('导入'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    final downloads = context.read<DownloadController>();
+    setState(() => _transferringAppData = true);
+    try {
+      await downloads.pauseAll();
+      final result = await library.importPortableAppData();
+      if (!context.mounted) return;
+      await Future.wait([
+        context.read<AppearanceController>().initialize(),
+        context.read<ReadingHistoryController>().initialize(),
+        library.reloadLocalState(),
+        context.read<FavoritesController>().loadCache(),
+        downloads.initialize(),
+      ]);
+      if (!context.mounted) return;
+      await _restoreClientPreferences(context, library);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已导入 ${result.totalRows} 条应用数据，下载任务保持暂停')),
+      );
+    } catch (exception) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('应用数据导入失败：$exception')));
+    } finally {
+      if (mounted) setState(() => _transferringAppData = false);
+    }
+  }
+
+  Future<void> _restoreClientPreferences(
+    BuildContext context,
+    LibraryController library,
+  ) async {
+    final client = context.read<CopyClient>();
+    client.setApiRoute(
+      CopyApiRoute.fromSetting(await library.database.setting('api_route')),
+    );
+    final apiDomain = await library.database.setting('api_domain');
+    final apiMode = await library.database.setting('api_domain_mode');
+    if (apiMode == 'manual' &&
+        apiDomain.isNotEmpty &&
+        !CopyApiProtocol.isPresetDomain(apiDomain)) {
+      client.setApiDomain(apiDomain);
+    }
+    final authenticationDomain = await library.database.setting(
+      'authentication_domain',
+    );
+    final authenticationMode = await library.database.setting(
+      'authentication_domain_mode',
+    );
+    if (authenticationMode == 'manual' && authenticationDomain.isNotEmpty) {
+      client.setAuthenticationDomain(authenticationDomain);
+    }
   }
 
   Future<void> _chooseExternalLibrary(

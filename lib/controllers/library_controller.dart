@@ -48,6 +48,13 @@ class LibraryController extends ChangeNotifier {
   Directory? get root => database.root;
   String get rootPath => root?.path ?? '';
   bool get usingExternal => locator.usingExternal;
+  File get portableAppDataBackupFile {
+    final libraryRoot = root;
+    if (libraryRoot == null) throw StateError('漫画库尚未初始化');
+    return File(
+      p.join(libraryRoot.path, LocalAppDatabase.portableBackupFileName),
+    );
+  }
 
   Future<void> initialize() async {
     loading = true;
@@ -107,6 +114,26 @@ class LibraryController extends ChangeNotifier {
     await localDatabase.setPreference(
       'batch_scan_concurrency',
       normalized.toString(),
+    );
+  }
+
+  Future<void> reloadLocalState() async {
+    await _restoreViewPreferences();
+    _applyView();
+    notifyListeners();
+  }
+
+  Future<PortableAppDataTransferResult> exportPortableAppData() {
+    return localDatabase.exportPortableBackup(
+      portableAppDataBackupFile,
+      libraryKey: database.libraryKey,
+    );
+  }
+
+  Future<PortableAppDataTransferResult> importPortableAppData() {
+    return localDatabase.importPortableBackup(
+      portableAppDataBackupFile,
+      libraryKey: database.libraryKey,
     );
   }
 

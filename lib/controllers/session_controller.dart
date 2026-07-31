@@ -5,7 +5,11 @@ import '../services/copy_client.dart';
 
 class SessionController extends ChangeNotifier {
   SessionController(this.client, {FlutterSecureStorage? secureStorage})
-    : _secureStorage = secureStorage ?? const FlutterSecureStorage();
+    : _secureStorage =
+          secureStorage ??
+          const FlutterSecureStorage(
+            mOptions: MacOsOptions(usesDataProtectionKeychain: false),
+          );
 
   static const _tokenKey = 'copy_manga_token';
   static const _usernameKey = 'copy_manga_username';

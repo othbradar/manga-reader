@@ -12,7 +12,11 @@ class LibraryLocator {
   LibraryLocator({
     FlutterSecureStorage? secureStorage,
     ExternalLibraryAccess? externalAccess,
-  }) : _secureStorage = secureStorage ?? const FlutterSecureStorage(),
+  }) : _secureStorage =
+           secureStorage ??
+           const FlutterSecureStorage(
+             mOptions: MacOsOptions(usesDataProtectionKeychain: false),
+           ),
        _externalAccess = externalAccess ?? const ExternalLibraryAccess();
 
   static const _rootKey = 'manga_library_root';

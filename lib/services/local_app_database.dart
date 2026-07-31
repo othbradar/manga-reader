@@ -10,6 +10,35 @@ import '../models/recent_view.dart';
 
 typedef AppSupportDirectoryProvider = Future<Directory> Function();
 
+class PortableAppDataTransferResult {
+  const PortableAppDataTransferResult({
+    required this.recentViews,
+    required this.readProgress,
+    required this.preferences,
+    required this.comicDetails,
+    required this.favorites,
+    required this.downloadTasks,
+    required this.searchEntries,
+  });
+
+  final int recentViews;
+  final int readProgress;
+  final int preferences;
+  final int comicDetails;
+  final int favorites;
+  final int downloadTasks;
+  final int searchEntries;
+
+  int get totalRows =>
+      recentViews +
+      readProgress +
+      preferences +
+      comicDetails +
+      favorites +
+      downloadTasks +
+      searchEntries;
+}
+
 class LocalAppDatabase {
   LocalAppDatabase({
     DatabaseFactory? factory,
@@ -19,6 +48,21 @@ class LocalAppDatabase {
            supportDirectoryProvider ?? getApplicationSupportDirectory;
 
   static const fileName = 'copy_manga_reader_local.db';
+  static const portableBackupFileName = '拷贝漫画阅读器应用数据.db';
+  static const _portableBackupFormat = 'copy_manga_reader_app_data';
+  static const _portableBackupVersion = 1;
+  static const _portableLibraryKey = '__portable_current_library__';
+  static const _globalTables = <String>[
+    'recent_views',
+    'read_progress',
+    'local_preferences',
+  ];
+  static const _libraryTables = <String>[
+    'comic_details',
+    'favorites_cache',
+    'download_tasks',
+    'search_index',
+  ];
 
   final DatabaseFactory _factory;
   final AppSupportDirectoryProvider _supportDirectoryProvider;
@@ -420,6 +464,283 @@ class LocalAppDatabase {
       where: 'library_key = ?',
       whereArgs: [libraryKey],
     );
+  }
+
+  /// Writes a portable SQLite snapshot beside the current manga library.
+  ///
+  /// The shared manga index is not touched. Login tokens, passwords and
+  /// platform directory grants are held by secure storage and deliberately
+  /// excluded from this file.
+  Future<PortableAppDataTransferResult> exportPortableBackup(
+    File destination, {
+    required String libraryKey,
+  }) async {
+    if (libraryKey.trim().isEmpty) throw ArgumentError.value(libraryKey);
+    await open();
+    final sourcePath = p.canonicalize(File(databasePath).absolute.path);
+    final destinationPath = p.canonicalize(destination.absolute.path);
+    if (sourcePath == destinationPath) {
+      throw ArgumentError('应用数据库不能覆盖自身');
+    }
+
+    await destination.parent.create(recursive: true);
+    final partial = File('${destination.path}.partial');
+    await _deleteSqliteFamily(partial);
+
+    Database? backup;
+    var completed = false;
+    try {
+      backup = await _factory.openDatabase(
+        partial.path,
+        options: OpenDatabaseOptions(
+          version: 1,
+          singleInstance: false,
+          onConfigure: (db) async {
+            await db.rawQuery('PRAGMA journal_mode = DELETE');
+            await db.rawQuery('PRAGMA busy_timeout = 5000');
+          },
+          onCreate: (db, _) async {
+            await _createSchema(db);
+            await _createPortableMetadataSchema(db);
+          },
+        ),
+      );
+      await _createSchema(backup);
+      await _createPortableMetadataSchema(backup);
+
+      final globalRows = <String, List<Map<String, Object?>>>{
+        for (final table in _globalTables)
+          table: await _exportableGlobalRows(table),
+      };
+      final libraryRows = <String, List<Map<String, Object?>>>{
+        for (final table in _libraryTables)
+          table: await database.query(
+            table,
+            where: 'library_key = ?',
+            whereArgs: [libraryKey],
+          ),
+      };
+
+      await backup.transaction((transaction) async {
+        for (final table in [..._globalTables, ..._libraryTables]) {
+          await transaction.delete(table);
+        }
+        await transaction.delete('portable_backup_metadata');
+        await transaction.insert('portable_backup_metadata', {
+          'format': _portableBackupFormat,
+          'format_version': _portableBackupVersion,
+          'exported_at': DateTime.now().toUtc().toIso8601String(),
+        });
+        for (final entry in globalRows.entries) {
+          for (final row in entry.value) {
+            await transaction.insert(
+              entry.key,
+              Map<String, Object?>.from(row),
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+          }
+        }
+        for (final entry in libraryRows.entries) {
+          for (final row in entry.value) {
+            await transaction.insert(entry.key, {
+              ...row,
+              'library_key': _portableLibraryKey,
+            }, conflictAlgorithm: ConflictAlgorithm.replace);
+          }
+        }
+      });
+
+      final result = _transferResult(globalRows, libraryRows);
+      await backup.close();
+      backup = null;
+      await _deleteSqliteCompanions(destination);
+      await partial.rename(destination.path);
+      completed = true;
+      return result;
+    } finally {
+      await backup?.close();
+      if (!completed) await _deleteSqliteFamily(partial);
+    }
+  }
+
+  /// Merges a portable snapshot into this device and remaps its library-scoped
+  /// rows to the currently opened manga library.
+  Future<PortableAppDataTransferResult> importPortableBackup(
+    File source, {
+    required String libraryKey,
+  }) async {
+    if (libraryKey.trim().isEmpty) throw ArgumentError.value(libraryKey);
+    if (!await source.exists()) {
+      throw FileSystemException('找不到应用数据备份', source.path);
+    }
+    await _verifySQLiteHeader(source);
+    await open();
+
+    Database? backup;
+    try {
+      backup = await _factory.openDatabase(
+        source.path,
+        options: OpenDatabaseOptions(readOnly: true, singleInstance: false),
+      );
+      final tableRows = await backup.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+      );
+      final tables = tableRows
+          .map((row) => row['name']?.toString() ?? '')
+          .toSet();
+      final requiredTables = {
+        'portable_backup_metadata',
+        ..._globalTables,
+        ..._libraryTables,
+      };
+      final missing = requiredTables.difference(tables);
+      if (missing.isNotEmpty) {
+        throw FormatException('应用数据备份缺少必要数据表：${missing.join('、')}');
+      }
+      final metadata = await backup.query('portable_backup_metadata', limit: 1);
+      if (metadata.isEmpty ||
+          metadata.first['format']?.toString() != _portableBackupFormat ||
+          (metadata.first['format_version'] as num?)?.toInt() !=
+              _portableBackupVersion) {
+        throw const FormatException('不是受支持的拷贝漫画阅读器应用数据备份');
+      }
+
+      final globalRows = <String, List<Map<String, Object?>>>{
+        for (final table in _globalTables) table: await backup.query(table),
+      };
+      final libraryRows = <String, List<Map<String, Object?>>>{
+        for (final table in _libraryTables)
+          table: await backup.query(
+            table,
+            where: 'library_key = ?',
+            whereArgs: [_portableLibraryKey],
+          ),
+      };
+
+      await database.transaction((transaction) async {
+        for (final entry in globalRows.entries) {
+          for (final row in entry.value) {
+            await transaction.insert(
+              entry.key,
+              Map<String, Object?>.from(row),
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+          }
+        }
+        for (final entry in libraryRows.entries) {
+          for (final sourceRow in entry.value) {
+            final row = <String, Object?>{
+              ...sourceRow,
+              'library_key': libraryKey,
+            };
+            if (entry.key == 'download_tasks') {
+              final state = row['state']?.toString();
+              if (state == DownloadState.queued.name ||
+                  state == DownloadState.downloading.name) {
+                row['state'] = DownloadState.paused.name;
+                row['error_message'] = '从其他设备导入，任务已安全暂停';
+              }
+            }
+            await transaction.insert(
+              entry.key,
+              row,
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+          }
+        }
+      });
+      return _transferResult(globalRows, libraryRows);
+    } finally {
+      await backup?.close();
+    }
+  }
+
+  Future<List<Map<String, Object?>>> _exportableGlobalRows(String table) async {
+    if (table != 'local_preferences') return database.query(table);
+    return database.query(
+      table,
+      where: "preference_key NOT LIKE 'legacy_app_state_imported:%'",
+    );
+  }
+
+  static PortableAppDataTransferResult _transferResult(
+    Map<String, List<Map<String, Object?>>> globalRows,
+    Map<String, List<Map<String, Object?>>> libraryRows,
+  ) {
+    return PortableAppDataTransferResult(
+      recentViews: globalRows['recent_views']?.length ?? 0,
+      readProgress: globalRows['read_progress']?.length ?? 0,
+      preferences: globalRows['local_preferences']?.length ?? 0,
+      comicDetails: libraryRows['comic_details']?.length ?? 0,
+      favorites: libraryRows['favorites_cache']?.length ?? 0,
+      downloadTasks: libraryRows['download_tasks']?.length ?? 0,
+      searchEntries: libraryRows['search_index']?.length ?? 0,
+    );
+  }
+
+  static Future<void> _createPortableMetadataSchema(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS portable_backup_metadata(
+        format TEXT PRIMARY KEY,
+        format_version INTEGER NOT NULL,
+        exported_at TEXT NOT NULL DEFAULT ''
+      )
+    ''');
+  }
+
+  static Future<void> _verifySQLiteHeader(File source) async {
+    final handle = await source.open();
+    try {
+      final header = await handle.read(16);
+      const expected = <int>[
+        0x53,
+        0x51,
+        0x4c,
+        0x69,
+        0x74,
+        0x65,
+        0x20,
+        0x66,
+        0x6f,
+        0x72,
+        0x6d,
+        0x61,
+        0x74,
+        0x20,
+        0x33,
+        0x00,
+      ];
+      if (header.length != expected.length ||
+          !List<int>.generate(
+            expected.length,
+            (index) => header[index] ^ expected[index],
+          ).every((value) => value == 0)) {
+        throw const FormatException('应用数据备份不是有效的 SQLite 文件');
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+
+  static Future<void> _deleteSqliteFamily(File databaseFile) async {
+    for (final path in [
+      databaseFile.path,
+      '${databaseFile.path}-wal',
+      '${databaseFile.path}-shm',
+    ]) {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    }
+  }
+
+  static Future<void> _deleteSqliteCompanions(File databaseFile) async {
+    for (final path in [
+      '${databaseFile.path}-wal',
+      '${databaseFile.path}-shm',
+    ]) {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    }
   }
 
   Future<void> close() async {
