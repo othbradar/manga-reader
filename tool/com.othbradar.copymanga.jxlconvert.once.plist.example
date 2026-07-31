@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.othbradar.copymanga.jxlconvert.once</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-u</string>
+    <string>__PROJECT_DIR__/tool/convert_library_to_jxl.py</string>
+    <string>--source</string>
+    <string>__SOURCE_LIBRARY__</string>
+    <string>--destination</string>
+    <string>__DESTINATION_LIBRARY__</string>
+    <string>--effort</string>
+    <string>7</string>
+    <string>--workers</string>
+    <string>18</string>
+    <string>--codec-threads</string>
+    <string>1</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/private/tmp/copymanga_jxl_conversion_stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/private/tmp/copymanga_jxl_conversion_stderr.log</string>
+</dict>
+</plist>
