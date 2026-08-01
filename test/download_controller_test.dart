@@ -127,6 +127,120 @@ void main() {
       await temporary.delete(recursive: true);
     }
   });
+
+  test('单页瞬时失败会刷新图片地址并自动补下，不重下已完成页', () async {
+    final temporary = await Directory.systemTemp.createTemp(
+      'download-page-retry-test-',
+    );
+    final local = LocalAppDatabase(
+      factory: databaseFactoryFfi,
+      supportDirectoryProvider: () async =>
+          Directory('${temporary.path}/app-support'),
+    );
+    final library = LibraryDatabase(localDatabase: local);
+    await library.open(Directory('${temporary.path}/library'));
+    final client = _RetryingPageCopyClient();
+    final controller = DownloadController(
+      database: library,
+      client: client,
+      pageRetryBaseDelay: Duration.zero,
+    );
+
+    try {
+      await controller.initialize();
+      await controller.setImageDownloadConcurrency(1);
+      await controller.enqueue(
+        const Comic(
+          uuid: 'comic-retry',
+          pathWord: 'comic-retry',
+          title: '重试漫画',
+          authors: '作者',
+        ),
+        const <Chapter>[
+          Chapter(
+            uuid: 'chapter-retry',
+            comicUuid: 'comic-retry',
+            groupPathWord: 'default',
+            groupName: '默认',
+            title: '第1话',
+            order: 1,
+          ),
+        ],
+      );
+
+      await controller.resumeAll();
+      await _waitUntil(
+        () => controller.tasks.single.state == DownloadState.completed,
+      );
+
+      expect(client.chapterContentCalls, 2);
+      expect(client.callsFor('https://old.example/1.jpg'), 1);
+      expect(client.callsFor('https://old.example/2.jpg'), 2);
+      expect(client.callsFor('https://new.example/2.jpg'), 1);
+      expect(controller.tasks.single.progress, 1);
+      expect(controller.tasks.single.errorMessage, isEmpty);
+    } finally {
+      controller.dispose();
+      await library.close();
+      await local.close();
+      await temporary.delete(recursive: true);
+    }
+  });
+
+  test('章节图片接口瞬时返回未认证时会自动重试', () async {
+    final temporary = await Directory.systemTemp.createTemp(
+      'download-content-retry-test-',
+    );
+    final local = LocalAppDatabase(
+      factory: databaseFactoryFfi,
+      supportDirectoryProvider: () async =>
+          Directory('${temporary.path}/app-support'),
+    );
+    final library = LibraryDatabase(localDatabase: local);
+    await library.open(Directory('${temporary.path}/library'));
+    final client = _RetryingChapterContentCopyClient();
+    final controller = DownloadController(
+      database: library,
+      client: client,
+      pageRetryBaseDelay: Duration.zero,
+    );
+
+    try {
+      await controller.initialize();
+      await controller.enqueue(
+        const Comic(
+          uuid: 'comic-content-retry',
+          pathWord: 'comic-content-retry',
+          title: '章节地址重试',
+          authors: '作者',
+        ),
+        const <Chapter>[
+          Chapter(
+            uuid: 'chapter-content-retry',
+            comicUuid: 'comic-content-retry',
+            groupPathWord: 'default',
+            groupName: '默认',
+            title: '第1话',
+            order: 1,
+          ),
+        ],
+      );
+
+      await controller.resumeAll();
+      await _waitUntil(
+        () => controller.tasks.single.state == DownloadState.completed,
+      );
+
+      expect(client.chapterContentCalls, 3);
+      expect(client.domainRefreshCalls, 2);
+      expect(controller.tasks.single.errorMessage, isEmpty);
+    } finally {
+      controller.dispose();
+      await library.close();
+      await local.close();
+      await temporary.delete(recursive: true);
+    }
+  });
 }
 
 Future<void> _waitUntil(bool Function() condition) async {
@@ -200,6 +314,76 @@ final class _ConcurrentCopyClient extends CopyClient {
     await Future<void>.delayed(const Duration(milliseconds: 2));
     onReceiveProgress?.call(1, 1);
     _active--;
+    return Uint8List.fromList(<int>[0xff, 0xd8, 0xff, 0xd9]);
+  }
+}
+
+final class _RetryingPageCopyClient extends CopyClient {
+  int chapterContentCalls = 0;
+  final Map<String, int> _imageCalls = <String, int>{};
+
+  int callsFor(String url) => _imageCalls[url] ?? 0;
+
+  @override
+  Future<ChapterContent> chapterContent({
+    required String comicPathWord,
+    required String chapterUuid,
+  }) async {
+    chapterContentCalls++;
+    final host = chapterContentCalls == 1 ? 'old.example' : 'new.example';
+    return ChapterContent(
+      urls: <String>['https://$host/1.jpg', 'https://$host/2.jpg'],
+      pageCount: 2,
+    );
+  }
+
+  @override
+  Future<Uint8List> imageBytes(
+    String url, {
+    ProgressCallback? onReceiveProgress,
+    CancelToken? cancelToken,
+  }) async {
+    _imageCalls[url] = (_imageCalls[url] ?? 0) + 1;
+    if (url == 'https://old.example/2.jpg') {
+      throw const CopyApiException('网络连接失败');
+    }
+    onReceiveProgress?.call(1, 1);
+    return Uint8List.fromList(<int>[0xff, 0xd8, 0xff, 0xd9]);
+  }
+}
+
+final class _RetryingChapterContentCopyClient extends CopyClient {
+  int chapterContentCalls = 0;
+  int domainRefreshCalls = 0;
+
+  @override
+  Future<ChapterContent> chapterContent({
+    required String comicPathWord,
+    required String chapterUuid,
+  }) async {
+    chapterContentCalls++;
+    if (chapterContentCalls < 3) {
+      throw const CopyApiException('身份认证信息未提供。', code: 401);
+    }
+    return const ChapterContent(
+      urls: <String>['https://img.example/recovered.jpg'],
+      pageCount: 1,
+    );
+  }
+
+  @override
+  Future<List<CopyApiNode>> refreshApiDomains() async {
+    domainRefreshCalls++;
+    return const <CopyApiNode>[];
+  }
+
+  @override
+  Future<Uint8List> imageBytes(
+    String url, {
+    ProgressCallback? onReceiveProgress,
+    CancelToken? cancelToken,
+  }) async {
+    onReceiveProgress?.call(1, 1);
     return Uint8List.fromList(<int>[0xff, 0xd8, 0xff, 0xd9]);
   }
 }

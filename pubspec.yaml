@@ -1,7 +1,7 @@
 name: copymanga_reader
 description: 共用 SQLite 与章节 ZIP 漫画库的 Android、iOS、iPadOS 和 macOS 阅读器
 publish_to: none
-version: 0.4.0+25
+version: 0.4.1+26
 
 environment:
   sdk: ^3.12.2

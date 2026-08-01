@@ -21,10 +21,17 @@ class ComicDownloadSelection {
 }
 
 class DownloadController extends ChangeNotifier {
-  DownloadController({required this.database, required this.client});
+  DownloadController({
+    required this.database,
+    required this.client,
+    this.pageDownloadMaxAttempts = 5,
+    this.pageRetryBaseDelay = const Duration(milliseconds: 700),
+  }) : assert(pageDownloadMaxAttempts > 0);
 
   final LibraryDatabase database;
   final CopyClient client;
+  final int pageDownloadMaxAttempts;
+  final Duration pageRetryBaseDelay;
 
   List<DownloadTask> tasks = const [];
   bool globalPaused = true;
@@ -197,10 +204,8 @@ class DownloadController extends ChangeNotifier {
     try {
       final root = database.root;
       if (root == null) throw StateError('漫画库未打开');
-      final content = await client.chapterContent(
-        comicPathWord: task.comicPathWord,
-        chapterUuid: task.chapterUuid,
-      );
+      final content = await _loadChapterContentWithRetry(task);
+      var pageUrls = List<String>.of(content.urls);
       final comicDirectory = Directory(
         p.join(root.path, comicDirectoryName(task.comicTitle, task.authors)),
       );
@@ -209,8 +214,8 @@ class DownloadController extends ChangeNotifier {
         p.join(root.path, '.download_tmp', task.chapterUuid),
       );
       await temporaryDirectory.create(recursive: true);
-      final width = content.urls.length.toString().length.clamp(3, 6);
-      final pageProgress = List<double>.filled(content.urls.length, 0);
+      final width = pageUrls.length.toString().length.clamp(3, 6);
+      final pageProgress = List<double>.filled(pageUrls.length, 0);
       final existingPageStems = <String>{};
       await for (final entity in temporaryDirectory.list(followLinks: false)) {
         if (entity is File &&
@@ -218,7 +223,7 @@ class DownloadController extends ChangeNotifier {
           existingPageStems.add(p.basenameWithoutExtension(entity.path));
         }
       }
-      for (var index = 0; index < content.urls.length; index++) {
+      for (var index = 0; index < pageUrls.length; index++) {
         final stem = (index + 1).toString().padLeft(width, '0');
         if (existingPageStems.contains(stem)) pageProgress[index] = 1;
       }
@@ -233,40 +238,114 @@ class DownloadController extends ChangeNotifier {
       }
 
       publishCombinedProgress(force: true);
+      Future<void>? addressRefresh;
+
+      Future<void> refreshPageAddresses() {
+        final active = addressRefresh;
+        if (active != null) return active;
+        final refresh = () async {
+          try {
+            final refreshed = await _loadChapterContentWithRetry(
+              task,
+              maxAttempts: 2,
+            );
+            if (refreshed.urls.length != pageUrls.length) {
+              throw CopyApiException(
+                '刷新章节图片地址后页数发生变化'
+                '（${pageUrls.length} → ${refreshed.urls.length}）',
+              );
+            }
+            pageUrls = List<String>.of(refreshed.urls);
+          } finally {
+            addressRefresh = null;
+          }
+        }();
+        addressRefresh = refresh;
+        return refresh;
+      }
+
+      Future<void> downloadPage(int index) async {
+        final stem = (index + 1).toString().padLeft(width, '0');
+        Object? lastFailure;
+        Uint8List? downloadedBytes;
+        String? downloadedExtension;
+        var attemptCount = 0;
+        for (var attempt = 1; attempt <= pageDownloadMaxAttempts; attempt++) {
+          attemptCount = attempt;
+          if (_pauseRequested || globalPaused) {
+            throw const _DownloadPaused();
+          }
+          try {
+            final bytes = await client.imageBytes(
+              pageUrls[index],
+              cancelToken: _cancelToken,
+              onReceiveProgress: (received, total) {
+                if (total <= 0) return;
+                pageProgress[index] = (received / total).clamp(0.0, 1.0);
+                publishCombinedProgress();
+              },
+            );
+            downloadedExtension = imageExtensionFromBytes(bytes);
+            downloadedBytes = bytes;
+            break;
+          } on _DownloadPaused {
+            rethrow;
+          } catch (exception) {
+            if (_pauseRequested || globalPaused) {
+              throw const _DownloadPaused();
+            }
+            lastFailure = exception;
+            if (attempt >= pageDownloadMaxAttempts ||
+                !_isRetryablePageFailure(exception)) {
+              break;
+            }
+            pageProgress[index] = 0;
+            publishCombinedProgress(force: true);
+            if (_shouldRefreshPageAddresses(exception, attempt)) {
+              try {
+                await refreshPageAddresses();
+              } catch (_) {
+                // The next image attempt may still succeed with the existing
+                // address. Keep the original image failure for diagnostics.
+              }
+            }
+            await _waitBeforeRetry(attempt, index);
+          }
+        }
+        if (downloadedBytes == null || downloadedExtension == null) {
+          throw CopyApiException(
+            '第 ${index + 1}/${pageUrls.length} 页下载失败，'
+            '已自动重试 ${attemptCount - 1} 次：$lastFailure',
+          );
+        }
+
+        final partial = File(p.join(temporaryDirectory.path, '$stem.part'));
+        final finalFile = File(
+          p.join(temporaryDirectory.path, '$stem.$downloadedExtension'),
+        );
+        if (await partial.exists()) await partial.delete();
+        await partial.writeAsBytes(downloadedBytes, flush: true);
+        await partial.rename(finalFile.path);
+        pageProgress[index] = 1;
+        publishCombinedProgress(force: true);
+        await database.updateDownloadTask(task);
+      }
+
       var nextPageIndex = 0;
       Future<void> downloadWorker() async {
-        while (nextPageIndex < content.urls.length) {
+        while (nextPageIndex < pageUrls.length) {
           if (_pauseRequested || globalPaused) {
             throw const _DownloadPaused();
           }
           final index = nextPageIndex++;
           if (pageProgress[index] >= 1) continue;
-          final stem = (index + 1).toString().padLeft(width, '0');
-          final bytes = await client.imageBytes(
-            content.urls[index],
-            cancelToken: _cancelToken,
-            onReceiveProgress: (received, total) {
-              if (total <= 0) return;
-              pageProgress[index] = (received / total).clamp(0.0, 1.0);
-              publishCombinedProgress();
-            },
-          );
-          final extension = imageExtensionFromBytes(bytes);
-          final partial = File(p.join(temporaryDirectory.path, '$stem.part'));
-          final finalFile = File(
-            p.join(temporaryDirectory.path, '$stem.$extension'),
-          );
-          await partial.writeAsBytes(bytes, flush: true);
-          await partial.rename(finalFile.path);
-          pageProgress[index] = 1;
-          publishCombinedProgress(force: true);
-          await database.updateDownloadTask(task);
+          await downloadPage(index);
         }
       }
 
-      final workerCount = imageDownloadConcurrency < content.urls.length
+      final workerCount = imageDownloadConcurrency < pageUrls.length
           ? imageDownloadConcurrency
-          : content.urls.length;
+          : pageUrls.length;
       await Future.wait(List.generate(workerCount, (_) => downloadWorker()));
 
       final archiveName = chapterArchiveName(
@@ -285,8 +364,12 @@ class DownloadController extends ChangeNotifier {
       if (await archive.exists()) await archive.delete();
       await partialArchive.rename(archive.path);
       final relative = p.relative(archive.path, from: root.path);
-      await database.markChapterDownloaded(task, relative, content.urls.length);
-      await _cacheCover(task);
+      await database.markChapterDownloaded(task, relative, pageUrls.length);
+      try {
+        await _cacheCover(task);
+      } catch (exception) {
+        debugPrint('封面缓存失败，不影响章节下载完成：$exception');
+      }
       if (await temporaryDirectory.exists()) {
         await temporaryDirectory.delete(recursive: true);
       }
@@ -316,6 +399,78 @@ class DownloadController extends ChangeNotifier {
       _cancelToken = null;
       tasks = await database.loadDownloadTasks();
       notifyListeners();
+    }
+  }
+
+  Future<ChapterContent> _loadChapterContentWithRetry(
+    DownloadTask task, {
+    int? maxAttempts,
+  }) async {
+    final attempts = maxAttempts ?? pageDownloadMaxAttempts;
+    Object? lastFailure;
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      if (_pauseRequested || globalPaused) throw const _DownloadPaused();
+      try {
+        return await client.chapterContent(
+          comicPathWord: task.comicPathWord,
+          chapterUuid: task.chapterUuid,
+        );
+      } on _DownloadPaused {
+        rethrow;
+      } catch (exception) {
+        if (_pauseRequested || globalPaused) throw const _DownloadPaused();
+        lastFailure = exception;
+        if (attempt >= attempts) break;
+        if (_shouldRefreshPageAddresses(exception, attempt)) {
+          try {
+            await client.refreshApiDomains();
+          } catch (_) {
+            // Retry the chapter request even if node discovery itself failed.
+          }
+        }
+        await _waitBeforeRetry(attempt, 0);
+      }
+    }
+    throw CopyApiException('获取章节图片地址失败，已自动重试：$lastFailure');
+  }
+
+  bool _isRetryablePageFailure(Object exception) {
+    if (exception is FileSystemException || exception is ArgumentError) {
+      return false;
+    }
+    return true;
+  }
+
+  bool _shouldRefreshPageAddresses(Object exception, int attempt) {
+    if (attempt >= 2) return true;
+    if (exception is CopyApiException &&
+        const <int>{401, 403, 404, 410}.contains(exception.code)) {
+      return true;
+    }
+    final message = exception.toString().toLowerCase();
+    return message.contains('http 401') ||
+        message.contains('http 403') ||
+        message.contains('http 404') ||
+        message.contains('身份认证') ||
+        message.contains('unauthorized') ||
+        message.contains('forbidden');
+  }
+
+  Future<void> _waitBeforeRetry(int failedAttempt, int pageIndex) async {
+    final multiplier = 1 << (failedAttempt - 1).clamp(0, 3);
+    final jitterMicros = pageRetryBaseDelay.inMicroseconds == 0
+        ? 0
+        : (pageIndex % 5) * (pageRetryBaseDelay.inMicroseconds ~/ 6);
+    var remainingMicros =
+        pageRetryBaseDelay.inMicroseconds * multiplier + jitterMicros;
+    const sliceMicros = 250000;
+    while (remainingMicros > 0) {
+      if (_pauseRequested || globalPaused) throw const _DownloadPaused();
+      final waitMicros = remainingMicros < sliceMicros
+          ? remainingMicros
+          : sliceMicros;
+      await Future<void>.delayed(Duration(microseconds: waitMicros));
+      remainingMicros -= waitMicros;
     }
   }
 

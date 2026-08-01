@@ -293,6 +293,28 @@ void main() {
     expect(adapter.authorizations, everyElement(isNull));
   });
 
+  test(
+    'anonymous chapter request skips a node that incorrectly requires auth',
+    () async {
+      final adapter = _CopyApiAdapter(anonymousAuthFailureOnNodeA: true);
+      final dio = Dio()..httpClientAdapter = adapter;
+      final client = CopyClient(dio: dio);
+
+      final content = await client.chapterContent(
+        comicPathWord: 'demo',
+        chapterUuid: 'chapter-1',
+      );
+
+      expect(content.urls, <String>[
+        'https://img.example/1.jpg',
+        'https://img.example/2.jpg',
+      ]);
+      expect(adapter.chapterRequests, contains('node-a.example/chapter'));
+      expect(adapter.chapterRequests, contains('node-b.example/chapter'));
+      expect(adapter.authorizations, everyElement(isNull));
+    },
+  );
+
   test('only member endpoints carry the stored login token', () async {
     final adapter = _CopyApiAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
@@ -423,6 +445,7 @@ final class _CopyApiAdapter implements HttpClientAdapter {
     this.failPrimaryLoginTransport = false,
     this.failOverseasDetails = false,
     this.nodeBIsFastest = false,
+    this.anonymousAuthFailureOnNodeA = false,
   });
 
   final bool serveCurrentChapter;
@@ -430,6 +453,7 @@ final class _CopyApiAdapter implements HttpClientAdapter {
   final bool failPrimaryLoginTransport;
   final bool failOverseasDetails;
   final bool nodeBIsFastest;
+  final bool anonymousAuthFailureOnNodeA;
   final List<String> chapterRequests = <String>[];
   final List<String> groupHosts = <String>[];
   final List<String> detailHosts = <String>[];
@@ -660,6 +684,12 @@ final class _CopyApiAdapter implements HttpClientAdapter {
       chapterRequests.add('${uri.host}/chapter');
       inMainlandValues.add(options.queryParameters['in_mainland']);
       platformValues.add(options.queryParameters['platform']);
+      if (anonymousAuthFailureOnNodeA && uri.host == 'node-a.example') {
+        return _json(<String, dynamic>{
+          'code': 401,
+          'message': '身份认证信息未提供。',
+        }, status: 401);
+      }
       if (serveCurrentChapter) {
         return _json(<String, dynamic>{
           'code': 200,
@@ -685,6 +715,12 @@ final class _CopyApiAdapter implements HttpClientAdapter {
       chapterRequests.add('${uri.host}/chapter2');
       inMainlandValues.add(options.queryParameters['in_mainland']);
       platformValues.add(options.queryParameters['platform']);
+      if (anonymousAuthFailureOnNodeA && uri.host == 'node-a.example') {
+        return _json(<String, dynamic>{
+          'code': 401,
+          'message': '身份认证信息未提供。',
+        }, status: 401);
+      }
       return _json(<String, dynamic>{
         'code': 200,
         'results': <String, dynamic>{
@@ -697,6 +733,12 @@ final class _CopyApiAdapter implements HttpClientAdapter {
       chapterRequests.add('${uri.host}/chapter2download');
       inMainlandValues.add(options.queryParameters['in_mainland']);
       platformValues.add(options.queryParameters['platform']);
+      if (anonymousAuthFailureOnNodeA && uri.host == 'node-a.example') {
+        return _json(<String, dynamic>{
+          'code': 401,
+          'message': '身份认证信息未提供。',
+        }, status: 401);
+      }
       if (uri.host == 'node-a.example') {
         return _json(<String, dynamic>{
           'code': 200,
@@ -725,10 +767,10 @@ final class _CopyApiAdapter implements HttpClientAdapter {
     return _maintenance();
   }
 
-  ResponseBody _json(Map<String, dynamic> value) {
+  ResponseBody _json(Map<String, dynamic> value, {int status = 200}) {
     return ResponseBody.fromString(
       jsonEncode(value),
-      200,
+      status,
       headers: <String, List<String>>{
         Headers.contentTypeHeader: <String>['application/json'],
       },

@@ -253,6 +253,18 @@ final class CopyApiTransport {
           _promoteDomain(domain);
         }
         return results;
+      } on CopyApiException catch (failure) {
+        // Anonymous content endpoints occasionally return 401/403 on one CDN
+        // node even though the same request succeeds on another node. Treat
+        // that as a node failure, but never hide a real login/authentication
+        // failure.
+        if (!isLogin &&
+            !authenticated &&
+            (failure.code == 401 || failure.code == 403)) {
+          lastFailure = _CopyNodeFailure(failure.message);
+          continue;
+        }
+        rethrow;
       } on _CopyNodeFailure catch (failure) {
         lastFailure = failure;
       }
@@ -284,7 +296,10 @@ final class CopyApiTransport {
         cancelToken: cancelToken,
       );
       if (response.statusCode != 200 || response.data == null) {
-        throw CopyApiException('图片下载失败（HTTP ${response.statusCode}）');
+        throw CopyApiException(
+          '图片下载失败（HTTP ${response.statusCode}）',
+          code: response.statusCode,
+        );
       }
       return Uint8List.fromList(response.data!);
     } on CopyApiException {
