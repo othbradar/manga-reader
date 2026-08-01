@@ -43,9 +43,14 @@ class ChapterContent {
 class CopyClient {
   CopyClient({
     Dio? dio,
+    Dio? imageDio,
     String apiDomain = CopyApiProtocol.defaultDomain,
     this.normalizer,
-  }) : _transport = CopyApiTransport(dio: dio, apiDomain: apiDomain);
+  }) : _transport = CopyApiTransport(
+         dio: dio,
+         imageDio: imageDio,
+         apiDomain: apiDomain,
+       );
 
   final CopyApiTransport _transport;
   final ChineseSearchNormalizer? normalizer;

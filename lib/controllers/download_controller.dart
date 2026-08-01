@@ -25,13 +25,22 @@ class DownloadController extends ChangeNotifier {
     required this.database,
     required this.client,
     this.pageDownloadMaxAttempts = 5,
-    this.pageRetryBaseDelay = const Duration(milliseconds: 700),
-  }) : assert(pageDownloadMaxAttempts > 0);
+    this.pageRetryBaseDelay = const Duration(seconds: 2),
+    List<Duration> automaticTaskRetryDelays = const <Duration>[
+      Duration(seconds: 10),
+      Duration(seconds: 30),
+      Duration(seconds: 60),
+    ],
+  }) : automaticTaskRetryDelays = List<Duration>.unmodifiable(
+         automaticTaskRetryDelays,
+       ),
+       assert(pageDownloadMaxAttempts > 0);
 
   final LibraryDatabase database;
   final CopyClient client;
   final int pageDownloadMaxAttempts;
   final Duration pageRetryBaseDelay;
+  final List<Duration> automaticTaskRetryDelays;
 
   List<DownloadTask> tasks = const [];
   bool globalPaused = true;
@@ -39,7 +48,10 @@ class DownloadController extends ChangeNotifier {
   bool _processing = false;
   Completer<void>? _processingDone;
   bool _pauseRequested = false;
+  bool _disposed = false;
   CancelToken? _cancelToken;
+  final Map<String, int> _automaticTaskRetryCounts = <String, int>{};
+  final Map<String, Timer> _automaticTaskRetryTimers = <String, Timer>{};
   DateTime _lastProgressNotification = DateTime.fromMillisecondsSinceEpoch(0);
 
   int get queuedCount => tasks
@@ -51,6 +63,7 @@ class DownloadController extends ChangeNotifier {
       .length;
 
   Future<void> initialize() async {
+    _cancelAllAutomaticTaskRetries(resetCounts: true);
     imageDownloadConcurrency =
         int.tryParse(
           await database.setting('image_download_concurrency'),
@@ -110,6 +123,7 @@ class DownloadController extends ChangeNotifier {
   }
 
   Future<void> resumeAll() async {
+    _cancelAllAutomaticTaskRetries(resetCounts: true);
     _pauseRequested = false;
     globalPaused = false;
     for (final task in tasks) {
@@ -126,11 +140,14 @@ class DownloadController extends ChangeNotifier {
   }
 
   Future<void> pauseAll() async {
+    final automaticallyRetrying = _automaticTaskRetryTimers.keys.toSet();
+    _cancelAllAutomaticTaskRetries();
     _pauseRequested = true;
     globalPaused = true;
     _cancelToken?.cancel('全局暂停');
     for (final task in tasks) {
-      if (task.state == DownloadState.queued) {
+      if (task.state == DownloadState.queued ||
+          automaticallyRetrying.contains(task.chapterUuid)) {
         await database.updateDownloadTask(
           task.copyWith(state: DownloadState.paused),
         );
@@ -149,6 +166,7 @@ class DownloadController extends ChangeNotifier {
   }
 
   Future<void> clearAllTasks() async {
+    _cancelAllAutomaticTaskRetries(resetCounts: true);
     _pauseRequested = true;
     globalPaused = true;
     _cancelToken?.cancel('清空下载任务');
@@ -160,6 +178,7 @@ class DownloadController extends ChangeNotifier {
   }
 
   Future<void> retry(DownloadTask task) async {
+    _cancelAutomaticTaskRetry(task.chapterUuid, resetCount: true);
     await database.updateDownloadTask(
       task.copyWith(state: DownloadState.queued, progress: 0, errorMessage: ''),
     );
@@ -185,7 +204,7 @@ class DownloadController extends ChangeNotifier {
     } finally {
       _processing = false;
       tasks = await database.loadDownloadTasks();
-      notifyListeners();
+      if (!_disposed) notifyListeners();
       if (!processingDone.isCompleted) processingDone.complete();
       if (identical(_processingDone, processingDone)) {
         _processingDone = null;
@@ -373,6 +392,7 @@ class DownloadController extends ChangeNotifier {
       if (await temporaryDirectory.exists()) {
         await temporaryDirectory.delete(recursive: true);
       }
+      _cancelAutomaticTaskRetry(task.chapterUuid, resetCount: true);
       task = task.copyWith(
         state: DownloadState.completed,
         progress: 1,
@@ -385,21 +405,93 @@ class DownloadController extends ChangeNotifier {
       await database.updateDownloadTask(task);
       _publishTask(task, force: true);
     } catch (exception) {
+      _AutomaticTaskRetry? automaticRetry;
       if (_pauseRequested || globalPaused) {
         task = task.copyWith(state: DownloadState.paused);
       } else {
+        automaticRetry = _nextAutomaticTaskRetry(exception, task.chapterUuid);
         task = task.copyWith(
           state: DownloadState.failed,
-          errorMessage: exception.toString(),
+          errorMessage: automaticRetry == null
+              ? exception.toString()
+              : '网络失败，${automaticRetry.delay.inSeconds} 秒后自动重试 '
+                    '${automaticRetry.attempt}/${automaticRetry.maxAttempts}：$exception',
         );
       }
       await database.updateDownloadTask(task);
       _publishTask(task, force: true);
+      if (automaticRetry != null) {
+        _scheduleAutomaticTaskRetry(task.chapterUuid, automaticRetry.delay);
+      }
     } finally {
       _cancelToken = null;
       tasks = await database.loadDownloadTasks();
-      notifyListeners();
+      if (!_disposed) notifyListeners();
     }
+  }
+
+  _AutomaticTaskRetry? _nextAutomaticTaskRetry(
+    Object exception,
+    String chapterUuid,
+  ) {
+    if (automaticTaskRetryDelays.isEmpty ||
+        (exception is! CopyApiException && exception is! DioException)) {
+      return null;
+    }
+    final attempt = (_automaticTaskRetryCounts[chapterUuid] ?? 0) + 1;
+    if (attempt > automaticTaskRetryDelays.length) return null;
+    _automaticTaskRetryCounts[chapterUuid] = attempt;
+    return _AutomaticTaskRetry(
+      attempt: attempt,
+      maxAttempts: automaticTaskRetryDelays.length,
+      delay: automaticTaskRetryDelays[attempt - 1],
+    );
+  }
+
+  void _scheduleAutomaticTaskRetry(String chapterUuid, Duration delay) {
+    _automaticTaskRetryTimers.remove(chapterUuid)?.cancel();
+    _automaticTaskRetryTimers[chapterUuid] = Timer(delay, () {
+      _automaticTaskRetryTimers.remove(chapterUuid);
+      unawaited(_resumeAutomaticTaskRetry(chapterUuid));
+    });
+  }
+
+  Future<void> _resumeAutomaticTaskRetry(String chapterUuid) async {
+    if (_disposed || globalPaused || _pauseRequested) return;
+    try {
+      final latestTasks = await database.loadDownloadTasks();
+      final index = latestTasks.indexWhere(
+        (task) => task.chapterUuid == chapterUuid,
+      );
+      if (index < 0 || latestTasks[index].state != DownloadState.failed) return;
+      await database.updateDownloadTask(
+        latestTasks[index].copyWith(
+          state: DownloadState.queued,
+          errorMessage: '',
+        ),
+      );
+      tasks = await database.loadDownloadTasks();
+      if (!_disposed) notifyListeners();
+      unawaited(_process());
+    } catch (exception) {
+      debugPrint('恢复自动重试任务失败：$exception');
+    }
+  }
+
+  void _cancelAutomaticTaskRetry(
+    String chapterUuid, {
+    bool resetCount = false,
+  }) {
+    _automaticTaskRetryTimers.remove(chapterUuid)?.cancel();
+    if (resetCount) _automaticTaskRetryCounts.remove(chapterUuid);
+  }
+
+  void _cancelAllAutomaticTaskRetries({bool resetCounts = false}) {
+    for (final timer in _automaticTaskRetryTimers.values) {
+      timer.cancel();
+    }
+    _automaticTaskRetryTimers.clear();
+    if (resetCounts) _automaticTaskRetryCounts.clear();
   }
 
   Future<ChapterContent> _loadChapterContentWithRetry(
@@ -513,12 +605,35 @@ class DownloadController extends ChangeNotifier {
       tasks = List<DownloadTask>.unmodifiable(updated);
     }
     final now = DateTime.now();
-    if (force ||
-        now.difference(_lastProgressNotification).inMilliseconds >= 250) {
+    if (!_disposed &&
+        (force ||
+            now.difference(_lastProgressNotification).inMilliseconds >= 250)) {
       _lastProgressNotification = now;
       notifyListeners();
     }
   }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _pauseRequested = true;
+    globalPaused = true;
+    _cancelAllAutomaticTaskRetries(resetCounts: true);
+    _cancelToken?.cancel('下载控制器已销毁');
+    super.dispose();
+  }
+}
+
+class _AutomaticTaskRetry {
+  const _AutomaticTaskRetry({
+    required this.attempt,
+    required this.maxAttempts,
+    required this.delay,
+  });
+
+  final int attempt;
+  final int maxAttempts;
+  final Duration delay;
 }
 
 class _DownloadPaused implements Exception {

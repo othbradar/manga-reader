@@ -34,9 +34,13 @@ class CopyApiNode {
 
 /// 带签名、动态节点发现和节点故障切换的网络传输层。
 final class CopyApiTransport {
-  CopyApiTransport({Dio? dio, String apiDomain = CopyApiProtocol.defaultDomain})
-    : _dio = dio ?? Dio(),
-      _apiDomain = CopyApiProtocol.normalizeDomain(apiDomain) {
+  CopyApiTransport({
+    Dio? dio,
+    Dio? imageDio,
+    String apiDomain = CopyApiProtocol.defaultDomain,
+  }) : _dio = dio ?? Dio(),
+       _imageDio = imageDio ?? dio ?? Dio(),
+       _apiDomain = CopyApiProtocol.normalizeDomain(apiDomain) {
     if (_apiDomain.isEmpty) {
       _apiDomain = CopyApiProtocol.defaultDomain;
     }
@@ -47,6 +51,7 @@ final class CopyApiTransport {
   static const Duration _failedDiscoveryRetry = Duration(minutes: 2);
 
   final Dio _dio;
+  final Dio _imageDio;
   final List<String> _dynamicDomains = <String>[];
   final List<String> _authenticationDomains = <String>[];
   final Map<String, bool> _domainMainland = <String, bool>{};
@@ -179,6 +184,14 @@ final class CopyApiTransport {
       sendTimeout: const Duration(seconds: 45),
       validateStatus: (status) => status != null && status < 500,
     );
+    if (!identical(_dio, _imageDio)) {
+      _imageDio.options = BaseOptions(
+        connectTimeout: const Duration(seconds: 20),
+        receiveTimeout: const Duration(seconds: 90),
+        sendTimeout: const Duration(seconds: 45),
+        validateStatus: (status) => status != null && status < 500,
+      );
+    }
   }
 
   Future<void> prepare() => _ensureDynamicDomains();
@@ -283,15 +296,9 @@ final class CopyApiTransport {
     CancelToken? cancelToken,
   }) async {
     try {
-      final response = await _dio.get<List<int>>(
+      final response = await _imageDio.get<List<int>>(
         url,
-        options: Options(
-          responseType: ResponseType.bytes,
-          headers: CopyApiProtocol.headers(
-            region: _regionForDomain(_apiDomain),
-            identity: _identity,
-          ),
-        ),
+        options: Options(responseType: ResponseType.bytes),
         onReceiveProgress: onReceiveProgress,
         cancelToken: cancelToken,
       );

@@ -241,6 +241,63 @@ void main() {
       await temporary.delete(recursive: true);
     }
   });
+
+  test('单页重试耗尽后会在后台重新取章节地址并继续任务', () async {
+    final temporary = await Directory.systemTemp.createTemp(
+      'download-task-retry-test-',
+    );
+    final local = LocalAppDatabase(
+      factory: databaseFactoryFfi,
+      supportDirectoryProvider: () async =>
+          Directory('${temporary.path}/app-support'),
+    );
+    final library = LibraryDatabase(localDatabase: local);
+    await library.open(Directory('${temporary.path}/library'));
+    final client = _RetryingWholeTaskCopyClient();
+    final controller = DownloadController(
+      database: library,
+      client: client,
+      pageDownloadMaxAttempts: 1,
+      pageRetryBaseDelay: Duration.zero,
+      automaticTaskRetryDelays: const <Duration>[Duration.zero],
+    );
+
+    try {
+      await controller.initialize();
+      await controller.enqueue(
+        const Comic(
+          uuid: 'comic-task-retry',
+          pathWord: 'comic-task-retry',
+          title: '整章自动重试',
+          authors: '作者',
+        ),
+        const <Chapter>[
+          Chapter(
+            uuid: 'chapter-task-retry',
+            comicUuid: 'comic-task-retry',
+            groupPathWord: 'default',
+            groupName: '默认',
+            title: '第1话',
+            order: 1,
+          ),
+        ],
+      );
+
+      await controller.resumeAll();
+      await _waitUntil(
+        () => controller.tasks.single.state == DownloadState.completed,
+      );
+
+      expect(client.chapterContentCalls, 2);
+      expect(client.imageCalls, 2);
+      expect(controller.tasks.single.errorMessage, isEmpty);
+    } finally {
+      controller.dispose();
+      await library.close();
+      await local.close();
+      await temporary.delete(recursive: true);
+    }
+  });
 }
 
 Future<void> _waitUntil(bool Function() condition) async {
@@ -383,6 +440,35 @@ final class _RetryingChapterContentCopyClient extends CopyClient {
     ProgressCallback? onReceiveProgress,
     CancelToken? cancelToken,
   }) async {
+    onReceiveProgress?.call(1, 1);
+    return Uint8List.fromList(<int>[0xff, 0xd8, 0xff, 0xd9]);
+  }
+}
+
+final class _RetryingWholeTaskCopyClient extends CopyClient {
+  int chapterContentCalls = 0;
+  int imageCalls = 0;
+
+  @override
+  Future<ChapterContent> chapterContent({
+    required String comicPathWord,
+    required String chapterUuid,
+  }) async {
+    chapterContentCalls++;
+    return ChapterContent(
+      urls: <String>['https://img.example/round-$chapterContentCalls.jpg'],
+      pageCount: 1,
+    );
+  }
+
+  @override
+  Future<Uint8List> imageBytes(
+    String url, {
+    ProgressCallback? onReceiveProgress,
+    CancelToken? cancelToken,
+  }) async {
+    imageCalls++;
+    if (imageCalls == 1) throw const CopyApiException('网络连接失败');
     onReceiveProgress?.call(1, 1);
     return Uint8List.fromList(<int>[0xff, 0xd8, 0xff, 0xd9]);
   }

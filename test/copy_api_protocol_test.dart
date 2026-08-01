@@ -167,7 +167,11 @@ void main() {
     () async {
       final adapter = _CopyApiAdapter(failOverseasDetails: true);
       final dio = Dio()..httpClientAdapter = adapter;
-      final client = CopyClient(dio: dio)..setApiRoute(CopyApiRoute.automatic);
+      final client = CopyClient(dio: dio)
+        ..setApiRoute(CopyApiRoute.automatic)
+        // 固定首个候选以验证跨区节点参数，避免并行测试
+        // 负载让毫秒级模拟测速偶发颠倒。自动选最低延迟由独立用例验证。
+        ..setApiDomain('node-a.example');
 
       final details = await client.comicDetails('demo');
 
@@ -333,6 +337,14 @@ void main() {
       everyElement('Token member-token'),
     );
     expect(adapter.authorizationFor('/cover.jpg'), everyElement(isNull));
+    final imageHeaderNames = adapter.imageRequest!.headers.keys
+        .map((name) => name.toLowerCase())
+        .toSet();
+    expect(imageHeaderNames, isNot(contains('authorization')));
+    expect(imageHeaderNames, isNot(contains('x-auth-signature')));
+    expect(imageHeaderNames, isNot(contains('version')));
+    expect(imageHeaderNames, isNot(contains('platform')));
+    expect(imageHeaderNames, isNot(contains('region')));
     expect(
       adapter.authorizationFor(CopyApiProtocol.networkPath),
       everyElement(isNull),
@@ -467,6 +479,7 @@ final class _CopyApiAdapter implements HttpClientAdapter {
   final List<({String path, String? authorization})> requests =
       <({String path, String? authorization})>[];
   RequestOptions? loginRequest;
+  RequestOptions? imageRequest;
 
   Iterable<String?> authorizationFor(String path) sync* {
     for (final request in requests) {
@@ -492,6 +505,7 @@ final class _CopyApiAdapter implements HttpClientAdapter {
       }
     }
     requests.add((path: uri.path, authorization: authorization));
+    if (uri.host == 'img.example') imageRequest = options;
     if (uri.path == CopyApiProtocol.loginPath) {
       loginHosts.add(uri.host);
       loginRequest = options;
