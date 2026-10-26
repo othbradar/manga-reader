@@ -20,7 +20,9 @@ class ContinuousReaderLayout {
         List<void>.filled(beforeAnchorCount, null),
       );
     }
-    return builderIndex;
+    // Slivers before CustomScrollView.center grow in reverse: child zero is
+    // directly above the anchor, not the first page of the chapter.
+    return anchorPage - 1 - builderIndex;
   }
 
   int pageFromAnchor(int builderIndex) {

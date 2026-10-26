@@ -284,22 +284,27 @@ class _ReaderPageState extends State<ReaderPage> {
     required bool fitWidth,
     required bool fullResolution,
   }) {
+    Widget frame(Widget child) => fitWidth
+        ? AspectRatio(aspectRatio: reader.pageAspectRatio(index), child: child)
+        : child;
     try {
       final mediaQuery = MediaQuery.of(context);
       final viewportPixelWidth =
           (mediaQuery.size.width * mediaQuery.devicePixelRatio).round();
-      Widget image(String path) => Image.file(
-        File(path),
-        width: fitWidth ? double.infinity : null,
-        fit: fitWidth ? BoxFit.fitWidth : BoxFit.contain,
-        alignment: Alignment.topCenter,
-        gaplessPlayback: true,
-        cacheWidth: fullResolution ? null : viewportPixelWidth,
-        filterQuality: fullResolution
-            ? FilterQuality.medium
-            : FilterQuality.low,
-        errorBuilder: (_, error, _) =>
-            _pageError(reader, index, error, fitWidth),
+      Widget image(String path) => frame(
+        Image.file(
+          File(path),
+          width: fitWidth ? double.infinity : null,
+          fit: fitWidth ? BoxFit.fitWidth : BoxFit.contain,
+          alignment: Alignment.topCenter,
+          gaplessPlayback: true,
+          cacheWidth: fullResolution ? null : viewportPixelWidth,
+          filterQuality: fullResolution
+              ? FilterQuality.medium
+              : FilterQuality.low,
+          errorBuilder: (_, error, _) =>
+              _pageError(reader, index, error, fitWidth),
+        ),
       );
       final cached = reader.cachedPagePath(index);
       if (cached != null) return image(cached);
@@ -309,17 +314,19 @@ class _ReaderPageState extends State<ReaderPage> {
           final path = snapshot.data;
           if (path != null) return image(path);
           if (snapshot.hasError) {
-            return _pageError(reader, index, snapshot.error!, fitWidth);
+            return frame(_pageError(reader, index, snapshot.error!, fitWidth));
           }
-          return SizedBox(
-            width: double.infinity,
-            height: fitWidth ? 240 : null,
-            child: const Center(child: CircularProgressIndicator()),
+          return frame(
+            SizedBox(
+              width: double.infinity,
+              height: fitWidth ? 240 : null,
+              child: const Center(child: CircularProgressIndicator()),
+            ),
           );
         },
       );
     } catch (error) {
-      return _pageError(reader, index, error, fitWidth);
+      return frame(_pageError(reader, index, error, fitWidth));
     }
   }
 

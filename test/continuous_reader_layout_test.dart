@@ -6,14 +6,15 @@ void main() {
     const layout = ContinuousReaderLayout(pageCount: 6, anchorPage: 4);
 
     final pages = [
-      for (var index = 0; index < layout.beforeAnchorCount; index++)
+      for (var index = layout.beforeAnchorCount - 1; index >= 0; index--)
         layout.pageBeforeAnchor(index),
       for (var index = 0; index < layout.fromAnchorCount; index++)
         layout.pageFromAnchor(index),
     ];
 
     expect(pages, [0, 1, 2, 3, 4, 5]);
-    expect(layout.pageBeforeAnchor(layout.beforeAnchorCount - 1), 3);
+    expect(layout.pageBeforeAnchor(0), 3);
+    expect(layout.pageBeforeAnchor(layout.beforeAnchorCount - 1), 0);
     expect(layout.pageFromAnchor(0), 4);
   });
 }

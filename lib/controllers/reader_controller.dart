@@ -5,6 +5,7 @@ import '../models/chapter.dart';
 import '../models/comic.dart';
 import '../services/copy_client.dart';
 import '../services/online_chapter_book.dart';
+import '../services/reader_image_metrics.dart';
 import '../services/zip_book.dart';
 import 'reading_history_controller.dart';
 
@@ -34,8 +35,11 @@ class ReaderController extends ChangeNotifier {
 
   ZipBook? _book;
   OnlineChapterBook? _onlineBook;
+  final Map<int, double> _pageAspectRatios = {};
+  final Map<int, Future<String>> _preparingPages = {};
   Timer? _progressSaveTimer;
   Future<void> _progressWrite = Future<void>.value();
+  bool _disposed = false;
   bool loading = true;
   String error = '';
   int currentPage = 0;
@@ -51,6 +55,17 @@ class ReaderController extends ChangeNotifier {
       final onlineClient = client;
       if (onlineClient == null) {
         _book = await ZipBook.open(archivePath!);
+        // Fix every local page's extent before laying out the two slivers.
+        // Bounded header reads do not populate the decoded image cache.
+        var nextPage = 0;
+        await Future.wait([
+          for (var worker = 0; worker < 4; worker++)
+            () async {
+              while (!_disposed && nextPage < pageCount) {
+                await ensurePagePath(nextPage++);
+              }
+            }(),
+        ]);
       } else {
         _onlineBook = await OnlineChapterBook.open(
           client: onlineClient,
@@ -58,10 +73,12 @@ class ReaderController extends ChangeNotifier {
           chapterUuid: chapter.uuid,
         );
       }
+      if (_disposed) return;
       final saved = await history.loadProgress(chapter.uuid);
+      if (_disposed) return;
       currentPage = pageCount == 0 ? 0 : saved.clamp(0, pageCount - 1);
       if (isOnline && pageCount > 0) {
-        unawaited(_onlineBook!.preloadAround(currentPage));
+        unawaited(_preloadAround(currentPage));
       }
       await history.record(
         comic: comic,
@@ -73,32 +90,61 @@ class ReaderController extends ChangeNotifier {
       error = exception.toString();
     } finally {
       loading = false;
-      notifyListeners();
+      if (_disposed) {
+        await _book?.close();
+      } else {
+        notifyListeners();
+      }
     }
   }
 
   String? cachedPagePath(int index) {
+    if (!_pageAspectRatios.containsKey(index)) return null;
     final book = _book;
     if (book != null) return book.pagePath(index);
     return _onlineBook?.cachedPagePath(index);
   }
 
   Future<String> ensurePagePath(int index) {
+    final cached = cachedPagePath(index);
+    if (cached != null) return Future<String>.value(cached);
+    return _preparingPages.putIfAbsent(
+      index,
+      () => _preparePage(index).whenComplete(() {
+        _preparingPages.remove(index);
+      }),
+    );
+  }
+
+  double pageAspectRatio(int index) =>
+      _pageAspectRatios[index] ?? readerPlaceholderAspectRatio;
+
+  Future<String> _preparePage(int index) async {
     final book = _book;
-    if (book != null) return Future<String>.value(book.pagePath(index));
     final onlineBook = _onlineBook;
-    if (onlineBook == null) throw StateError('阅读器尚未初始化');
-    return onlineBook.pagePath(index);
+    if (book == null && onlineBook == null) throw StateError('阅读器尚未初始化');
+    final path = book?.pagePath(index) ?? await onlineBook!.pagePath(index);
+    _pageAspectRatios[index] = await readReaderImageAspectRatio(path);
+    return path;
   }
 
   void retryPage(int index) => _onlineBook?.retryPage(index);
+
+  Future<void> _preloadAround(int index) async {
+    final first = (index - 2).clamp(0, pageCount - 1);
+    final last = (index + 2).clamp(0, pageCount - 1);
+    await Future.wait([
+      for (var page = first; page <= last; page++)
+        ensurePagePath(page).then<void>((_) {}, onError: (_) {}),
+    ]);
+  }
 
   void changePage(int index) {
     if (pageCount == 0) return;
     final nextPage = index.clamp(0, pageCount - 1);
     if (nextPage == currentPage) return;
     currentPage = nextPage;
-    if (isOnline) unawaited(_onlineBook!.preloadAround(nextPage));
+    if (isOnline) unawaited(_preloadAround(nextPage));
     _progressSaveTimer?.cancel();
     _progressSaveTimer = Timer(
       const Duration(milliseconds: 150),
@@ -142,9 +188,12 @@ class ReaderController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _progressSaveTimer?.cancel();
-    if (pageCount > 0) _queueProgressWrite(currentPage);
-    unawaited(_book?.close());
+    if (!loading) {
+      if (pageCount > 0) _queueProgressWrite(currentPage);
+      unawaited(_book?.close());
+    }
     super.dispose();
   }
 }
