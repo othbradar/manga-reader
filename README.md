@@ -152,6 +152,13 @@ COPYMANGA_REAL_ZIP=/absolute/path/chapter.zip \
   flutter test test/real_zip_test.dart
 ```
 
+Android 0.4.4 起内置 JXL 解码器，不依赖系统支持。可逆压缩页先还原原 JPEG，
+其他静态 JXL 生成 PNG 临时缓存。少于 100 页的本地章节后台预载全章，100 页及以上
+只预载当前页前后各 2 页；不修改源 ZIP 或索引，不把整章位图留在内存。
+首次 Android 构建会下载并校验固定版本的 libjxl/Brotli/Highway/skcms 源码；
+需要 NDK `28.2.13676358` 与 CMake `3.22.1`。离线解码测试见
+[JXL 解码与构建测试](docs/开发测试与发布.md#jxl-解码器专项检查)。
+
 ## 项目目录
 
 ```text
@@ -164,6 +171,7 @@ lib/
 └── widgets/        漫画网格、封面和缩放视口
 test/               单元、组件、协议和数据库回归测试
 tool/               漫画库迁移、补索引和 JXL 转换工具
+native/jxl/         Android 随包解码器 C ABI、固定版本原生构建
 android/            Android 平台桥接与构建配置
 ios/                iOS/iPadOS 平台桥接与构建配置
 macos/              macOS 安全书签、窗口与构建配置
@@ -173,6 +181,10 @@ macos/              macOS 安全书签、窗口与构建配置
 
 `assets/opencc` 中的简繁字符映射来自 OpenCC，并保留其 Apache-2.0
 许可证文件。
+
+Android JXL 解码器第三方许可集中在 `assets/licenses/jpeg_xl.txt`，随应用打包并
+注册到 Flutter LicenseRegistry。原生源代码下载地址、版本和 SHA-256 固定在
+`native/jxl/CMakeLists.txt`，下载源码和编译产物不提交。
 
 APK、IPA、Flutter 构建缓存、逆向参考 APK 和本机签名材料不提交到 Git。
 正式安装包由本地发布流程生成。项目没有在仓库中保存用户账号、密码、会员令牌、

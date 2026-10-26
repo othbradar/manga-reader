@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'controllers/appearance_controller.dart';
@@ -20,6 +22,14 @@ import 'services/local_app_database.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks([
+      'libjxl',
+      'Brotli',
+      'Highway',
+      'skcms',
+    ], await rootBundle.loadString('assets/licenses/jpeg_xl.txt'));
+  });
   runApp(const CopyMangaReaderBootstrap());
 }
 

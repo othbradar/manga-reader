@@ -62,7 +62,10 @@ class ReaderController extends ChangeNotifier {
           for (var worker = 0; worker < 4; worker++)
             () async {
               while (!_disposed && nextPage < pageCount) {
-                await ensurePagePath(nextPage++);
+                final index = nextPage++;
+                _pageAspectRatios[index] = await readReaderImageAspectRatio(
+                  _book!.pagePath(index),
+                );
               }
             }(),
         ]);
@@ -77,8 +80,8 @@ class ReaderController extends ChangeNotifier {
       final saved = await history.loadProgress(chapter.uuid);
       if (_disposed) return;
       currentPage = pageCount == 0 ? 0 : saved.clamp(0, pageCount - 1);
-      if (isOnline && pageCount > 0) {
-        unawaited(_preloadAround(currentPage));
+      if (pageCount > 0) {
+        unawaited(_initialPreload());
       }
       await history.record(
         comic: comic,
@@ -101,7 +104,7 @@ class ReaderController extends ChangeNotifier {
   String? cachedPagePath(int index) {
     if (!_pageAspectRatios.containsKey(index)) return null;
     final book = _book;
-    if (book != null) return book.pagePath(index);
+    if (book != null) return book.cachedDisplayPath(index);
     return _onlineBook?.cachedPagePath(index);
   }
 
@@ -123,14 +126,36 @@ class ReaderController extends ChangeNotifier {
     final book = _book;
     final onlineBook = _onlineBook;
     if (book == null && onlineBook == null) throw StateError('阅读器尚未初始化');
-    final path = book?.pagePath(index) ?? await onlineBook!.pagePath(index);
-    _pageAspectRatios[index] = await readReaderImageAspectRatio(path);
+    final path = book != null
+        ? await book.preparePagePath(index)
+        : await onlineBook!.pagePath(index);
+    // A page decoding later must not change established scroll extents.
+    if (!_pageAspectRatios.containsKey(index)) {
+      _pageAspectRatios[index] = await readReaderImageAspectRatio(path);
+    }
     return path;
   }
 
   void retryPage(int index) => _onlineBook?.retryPage(index);
 
+  Future<void> _initialPreload() async {
+    await _preloadAround(currentPage);
+    // Short local chapters prepare all encoded files, not decoded bitmaps.
+    // Books of 100+ pages and online chapters keep the nearby-page policy.
+    if (_disposed || isOnline || pageCount >= 100) return;
+    var next = 0;
+    await Future.wait([
+      for (var worker = 0; worker < 2; worker++)
+        () async {
+          while (!_disposed && next < pageCount) {
+            await ensurePagePath(next++).then<void>((_) {}, onError: (_) {});
+          }
+        }(),
+    ]);
+  }
+
   Future<void> _preloadAround(int index) async {
+    if (_disposed || pageCount == 0) return;
     final first = (index - 2).clamp(0, pageCount - 1);
     final last = (index + 2).clamp(0, pageCount - 1);
     await Future.wait([
@@ -144,7 +169,7 @@ class ReaderController extends ChangeNotifier {
     final nextPage = index.clamp(0, pageCount - 1);
     if (nextPage == currentPage) return;
     currentPage = nextPage;
-    if (isOnline) unawaited(_preloadAround(nextPage));
+    unawaited(_preloadAround(nextPage));
     _progressSaveTimer?.cancel();
     _progressSaveTimer = Timer(
       const Duration(milliseconds: 150),

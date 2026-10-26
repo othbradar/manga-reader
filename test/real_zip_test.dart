@@ -15,8 +15,10 @@ void main() {
       expect(book.length, greaterThan(1));
       expect(book.pageName(0), isNotEmpty);
       expect(File(book.pagePath(0)).existsSync(), isTrue);
-      final first = await book.bytes(0);
-      final last = await book.bytes(book.length - 1);
+      final first = await File(await book.preparePagePath(0)).readAsBytes();
+      final last = await File(
+        await book.preparePagePath(book.length - 1),
+      ).readAsBytes();
       expect(first, isNotEmpty);
       expect(last, isNotEmpty);
 

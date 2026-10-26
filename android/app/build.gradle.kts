@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "com.othbradar.copymangareader"
     compileSdk = flutter.compileSdkVersion
+    ndkVersion = "28.2.13676358"
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -21,6 +22,12 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        externalNativeBuild {
+            cmake {
+                targets += "reader_jxl"
+                arguments += "-DANDROID_STL=c++_static"
+            }
+        }
     }
 
     buildTypes {
@@ -28,6 +35,12 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("../../native/jxl/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 }

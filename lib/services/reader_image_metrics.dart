@@ -1,5 +1,7 @@
 import 'dart:ui' as ui;
 
+import 'jxl_codec.dart';
+
 const readerPlaceholderAspectRatio = 2 / 3;
 
 /// Read encoded image dimensions without decoding or retaining a full bitmap.
@@ -8,6 +10,9 @@ Future<double> readReaderImageAspectRatio(String path) async {
   ui.ImmutableBuffer? buffer;
   ui.ImageDescriptor? descriptor;
   try {
+    if (JxlCodec.requiresConversion(path)) {
+      return await JxlCodec.aspectRatio(path);
+    }
     buffer = await ui.ImmutableBuffer.fromFilePath(path);
     descriptor = await ui.ImageDescriptor.encoded(buffer);
     if (descriptor.width > 0 && descriptor.height > 0) {

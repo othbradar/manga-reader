@@ -1,7 +1,7 @@
 name: copymanga_reader
 description: 共用 SQLite 与章节 ZIP 漫画库的 Android、iOS、iPadOS 和 macOS 阅读器
 publish_to: none
-version: 0.4.3+28
+version: 0.4.4+29
 
 environment:
   sdk: ^3.12.2
@@ -11,6 +11,7 @@ dependencies:
   cached_network_image: ^3.4.1
   crypto: ^3.0.7
   dio: ^5.9.2
+  ffi: ^2.1.4
   flutter:
     sdk: flutter
   flutter_secure_storage: ^10.0.0
@@ -29,6 +30,7 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
+    - assets/licenses/jpeg_xl.txt
     - assets/opencc/LICENSE
     - assets/opencc/STCharacters.txt
     - assets/opencc/TSCharacters.txt
