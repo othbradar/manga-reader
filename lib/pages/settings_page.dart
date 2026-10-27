@@ -9,6 +9,7 @@ import '../controllers/favorites_controller.dart';
 import '../controllers/library_controller.dart';
 import '../controllers/reading_history_controller.dart';
 import '../controllers/session_controller.dart';
+import '../controllers/novel_controller.dart';
 import '../services/copy_api_protocol.dart';
 import '../services/copy_client.dart';
 import 'concurrency_settings_page.dart';
@@ -267,7 +268,9 @@ class _SettingsPageState extends State<SettingsPage> {
                   '每部漫画一个“漫画名 - 作者”文件夹；每章或单行本一个 ZIP；'
                   '封面使用“漫画名 - 作者 - 汇总”命名。详情、收藏缓存、'
                   '下载任务和阅读进度保存在应用本机的独立 SQLite 数据库，'
-                  '不改漫画库中的共享总索引结构。'
+                  '漫画旧表不变，小说、分卷和插图索引使用共享总索引中的独立新表。'
+                  '小说按每本一个文件夹保存卷或章节 TXT、封面和插图，位于“漫画”旁的“小说”文件夹。'
+                  '外置库若要同时访问漫画和小说，请在保存位置选择包含这两个文件夹的上一级目录，授权范围需要包含二者。'
                   '网络响应只作解析，不使用 JSON 文件保存索引。',
                 ),
               ),
@@ -285,11 +288,15 @@ class _SettingsPageState extends State<SettingsPage> {
     if (_transferringAppData) return;
     final downloads = context.read<DownloadController>();
     final wasPaused = downloads.globalPaused;
+    final novels = context.read<NovelController>();
+    final novelsWerePaused = novels.paused;
     setState(() => _transferringAppData = true);
     try {
       await downloads.pauseAll();
+      await novels.pause();
       final result = await library.exportPortableAppData();
       if (!wasPaused) await downloads.resumeAll();
+      if (!novelsWerePaused) await novels.resume();
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -301,6 +308,7 @@ class _SettingsPageState extends State<SettingsPage> {
       );
     } catch (exception) {
       if (!wasPaused) await downloads.resumeAll();
+      if (!novelsWerePaused) await novels.resume();
       if (!context.mounted) return;
       ScaffoldMessenger.of(
         context,
@@ -347,9 +355,11 @@ class _SettingsPageState extends State<SettingsPage> {
     if (confirmed != true || !context.mounted) return;
 
     final downloads = context.read<DownloadController>();
+    final novels = context.read<NovelController>();
     setState(() => _transferringAppData = true);
     try {
       await downloads.pauseAll();
+      await novels.pause();
       final result = await library.importPortableAppData();
       if (!context.mounted) return;
       await Future.wait([
@@ -358,6 +368,7 @@ class _SettingsPageState extends State<SettingsPage> {
         library.reloadLocalState(),
         context.read<FavoritesController>().loadCache(),
         downloads.initialize(),
+        novels.initialize(),
       ]);
       if (!context.mounted) return;
       await _restoreClientPreferences(context, library);
@@ -406,15 +417,25 @@ class _SettingsPageState extends State<SettingsPage> {
     LibraryController library,
   ) async {
     final downloads = context.read<DownloadController>();
+    final novels = context.read<NovelController>();
     final favorites = context.read<FavoritesController>();
     if (library.ready) {
+      await novels.pause();
       await downloads.pauseAll();
     }
     if (!context.mounted) return;
     final changed = await library.chooseExternalLibrary();
     if (!context.mounted) return;
     if (changed) {
-      await Future.wait([favorites.loadCache(), downloads.initialize()]);
+      // Regranting the same directory can make previously denied covers readable.
+      // Do not keep a failed ImageProvider result until the next app launch.
+      PaintingBinding.instance.imageCache.clear();
+      PaintingBinding.instance.imageCache.clearLiveImages();
+      await Future.wait([
+        favorites.loadCache(),
+        downloads.initialize(),
+        novels.initialize(),
+      ]);
     }
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -488,13 +509,19 @@ class _SettingsPageState extends State<SettingsPage> {
     LibraryController library,
   ) async {
     final downloads = context.read<DownloadController>();
+    final novels = context.read<NovelController>();
     final favorites = context.read<FavoritesController>();
+    await novels.pause();
     await downloads.pauseAll();
     if (!context.mounted) return;
     final changed = await library.resetToDefaultLibrary();
     if (!context.mounted) return;
     if (changed) {
-      await Future.wait([favorites.loadCache(), downloads.initialize()]);
+      await Future.wait([
+        favorites.loadCache(),
+        downloads.initialize(),
+        novels.initialize(),
+      ]);
     }
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(

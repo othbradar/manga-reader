@@ -8,6 +8,11 @@
 反编译产物、流量包、令牌和设备标识只保存在本机 `reverse_engineering`，该目录被
 Git 忽略。
 
+**最新维护入口（2026-10-27，阅读器 0.5.1+33）：**
+[3.0.9 协议复核、小说与收藏验收](2026-10-27_协议复核与收藏验收.md)。
+本文 §1–32 保留历次方法与定位线索，§33–35 是本次证据和结果；历史“尚未验收”
+仅指相应阶段，不能覆盖后面已完成的实测。地址仅适用于 §33 指纹对应的 ARM64 样本。
+
 ## 1. 已知基线：原版 3.0.9
 
 本机参考样本：
@@ -42,7 +47,7 @@ reverse_engineering/
 | --- | --- | --- |
 | `X-Auth-Timestamp`、`X-Auth-Signature` | `pp.txt` 约 `0x8d80` | 定位签名拦截器 |
 | 内容域名常量 | `pp.txt` 约 `0x8ee0`–`0x8f20` | 定位线路配置 |
-| `region=-0800` 和线路中文名 | `pp.txt` 约 `0x8628` | 判断线路属性 |
+| `-0800` 和线路中文名 | `pp.txt` 约 `0x8628` | 分别追踪日期构造与线路选择，不能直接当作 region |
 | `/api/v3/login`、`salt`、`password` | `pp.txt` 约 `0x23790`–`0x23828` | 定位登录编码 |
 | `/api/v3/system/network2` | `addNames.py` 字符池 | 定位动态节点 |
 | `/api/v3/comic2/` | `addNames.py` 字符池 | 定位详情接口 |
@@ -51,19 +56,24 @@ reverse_engineering/
 偏移和混淆类名只对同一 APK 构建有效。升级后应该重新按稳定字符串定位，不能复用
 旧绝对地址。
 
-3.0.9 已经迁移到项目的关键结论：
+2026-10-27 复核后的关键结论（纠正早期兼容实现与原版协议混淆）：
 
-- 内容请求与登录请求使用不同版本协商和请求头集合。
+- 早期项目有一套能登录的旧版兼容头，但不能据此认定原版登录使用独立版本协商。
+- 原版登录和小说收藏 POST 都走同一公共封装，将 `options.extra` 合并进表单。
 - 内容请求带秒级时间戳和 HMAC-SHA256 签名。
-- 当前基线的 HMAC key 和 message 都是时间戳 UTF-8 字节。
-- 登录密码是 `Base64(UTF8("$password-$salt"))`，salt 同时作为表单字段发送。
+- 原版 HMAC key 是原生 `getUmengString()` 的结果（内部名 `tapString`），message 才是时间戳。
+- `umString` 是同一个原生结果的 MD5，小写十六进制，不是 SHA-256。
+- 登录密码是 `Base64(UTF8("$password-$salt"))`；salt 每次随机取 `[0,9999)`，以字符串发送。
 - 动态节点来自 `/api/v3/system/network2`。
 - 国内/海外实际节点决定 `region` 和 `in_mainland`。
 - 搜索、详情、章节和图片可匿名访问，不应携带会员 token。
 - 登录返回 token 后还必须用资料接口验证。
-- 章节图片接口需要多个兼容路径和非空列表校验。
+- 章节图片需非空列表校验；0.5.0+32 阅读与保存 ZIP 共用匿名 chapter2，不再遍历旧接口。
 
-这些结论是“基线”，不是永久真理。新版必须重新验证变化项。
+实机已加载 DEX 中确认 `getUmengString()` 返回 APK 签名证书字节的 MD5；与
+`apksigner` 的公开证书摘要交叉核对一致。账号请求已接入恢复的签名、启动后参数和
+表单合并。尚未做新版真实账号的服务端验收，不能宣布账号限制已解除或绝不触发限制。
+详见文末第 33、34 节。0.5.0+32 已统一匿名与账号请求协议，删除旧签名兼容分支。
 
 ## 2. 每次逆向的目录和记录规范
 
@@ -472,7 +482,8 @@ Frida Hook 必须与 APK SHA-256 绑定。应用更新后先重新算偏移。
 
 ### 9.3 用独立小脚本验证
 
-当前 3.0.9 基线可以用：
+2026-10-27 修正：原版 HMAC 的 key 不等于时间戳。离线测试可用人工材料，
+与原版比较时则必须使用同次原生桥接返回值，不能把下面的测试材料用于服务器请求：
 
 ```python
 import hashlib
@@ -480,7 +491,8 @@ import hmac
 
 timestamp = "1785460000"
 data = timestamp.encode("utf-8")
-signature = hmac.new(data, data, hashlib.sha256).hexdigest()
+native_material = b"offline-fixture-key"  # 仅用于离线测试
+signature = hmac.new(native_material, data, hashlib.sha256).hexdigest()
 print(signature)
 ```
 
@@ -612,10 +624,11 @@ Flutter Release 的业务逻辑在 `libapp.so`。JADX 找不到 URL 并不说明
 APK 中可能同时保留旧接口、后备接口和未使用功能。字符串必须结合引用函数和运行时
 请求。
 
-### 把 Umeng key 当签名密钥
+### 把常量、哈希结果和原生签名材料混为一谈
 
-统计 key、`umString` 和 API HMAC 可能同时出现在同一个请求头构建器附近，但不代表
-它们参与同一算法。当前基线已经证明签名输入是时间戳。
+2026-10-27 发现早期文档错误地将时间戳同时写成 HMAC 的 key 和 message。
+实际调用链中 `getUmengString()` 的原始返回值作为 HMAC key，时间戳作为 message，
+原始返回值的 MD5 作为 `umString`。必须继续核实原生返回值来源，不能拿统计 app key 猜测。
 
 ### 给所有请求带 token
 
@@ -699,7 +712,8 @@ unzip -l "$SAMPLE_DIR/base.apk" \
 6. APK 是单包还是 split。
 7. 签名证书摘要是否变化。
 
-证书只用于确认样本来源和是否换壳，不等于 API 请求签名：
+证书本身不等于每次 API 请求签名，但 3.0.9 原生桥接将其 MD5 作为 HMAC key。
+因此除确认样本来源，还必须比较证书变化，不能遗漏这一依赖：
 
 ```bash
 apksigner verify --print-certs "$SAMPLE_DIR/base.apk" \
@@ -819,19 +833,18 @@ python3 --version
 示例：
 
 ```text
-结论：普通请求的 X-Auth-Signature 是 HMAC-SHA256(timestamp, timestamp)
-影响功能：节点、搜索、详情、章节、图片头
-静态证据：pp.txt 中头名；AOT 函数调用 Hmac/SHA256/utf8/hex
-运行时证据：Hook 到 timestamp 和最终 64 字符小写摘要
-独立重放：固定 timestamp=... 时 Dart/Python/原版输出一致
-反例：Umeng app key 作为 HMAC key 时不匹配
-适用样本：<sha256>
-置信度：已确认
-迁移文件：copy_api_protocol.dart
-回归测试：固定签名向量
+结论：X-Auth-Signature = HMAC-SHA256(key=UTF8(tapString), message=UTF8(timestamp))
+影响功能：原版普通 API 分支；图片 CDN 不应添加这些头
+静态证据：0xa350ac 读取 tapString，0xa35124 调用 0x308ac4
+设备代码证据：已加载 MainActivity.i() -> j(signatures[0].toByteArray()) -> MD5
+独立重放：apksigner 证书摘要与 Dart/OpenSSL 签名向量一致；未做账号网络重放
+适用样本：bdc96763c78bbc060a0f2f2c05024bb3379fad485be9843a82768f41c482194b
+置信度：调用链与算法由 AOT + 已加载 DEX 确认；完整服务端验收待测
+迁移文件：copy_account_protocol.dart、copy_api_transport.dart（账号路径）
+回归测试：account_request_safety_test.dart
 ```
 
-只有字符串证据的结论不能标“已确认”。
+只有字符串证据的结论不能标“已确认”。上例不是已经完成实机验证的声明。
 
 ## 21. Flutter AOT：从字符串回到实际函数
 
@@ -1261,7 +1274,7 @@ token
 
 迁移位置：
 
-- `loginHeaders()`
+- `CopyAccountProtocol.headers()` / `commonParameters()` / `formBody()`
 - `loginBody()`
 - `CopyApiTransport._requestFromDomain()` 的登录分支
 - `CopyClient.login()`
@@ -1452,7 +1465,7 @@ size
 - 空数组是未授权、接口退役、节点故障还是章节真空。
 
 本项目的判断标准是“能提取到至少一个非空图片 URL”。HTTP 200、code 200 但 contents 为空
-仍然失败，并继续尝试兼容路径。
+仍然失败。0.5.0+32 仅切换同一匿名阅读接口的内容节点，不遍历旧接口或账号下载专用接口。
 
 ### 24.12 图片 CDN
 
@@ -1837,3 +1850,309 @@ Blutter 输出和工具版本
 5. 新版相对上一版具体改了什么。
 6. 项目改了哪些文件。
 7. 哪些测试证明迁移没有破坏本地漫画库和下载。
+
+## 33. 2026-10-27：账号与小说收藏协议重新审计
+
+### 33.1 触发原因、范围与验收边界
+
+用户报告主账号在官网显示限制，官方要求使用原版 App 等待解除；手机原版 3.0.9
+登录新测试账号后可正常收藏。这证明至少该测试账号的原版收藏链路可用，但不能据此
+推断主账号已解限，也不能证明阅读器的请求参数正确。
+
+§33 所记录的初始审计阶段只做样本、已加载代码和本机模拟 HTTP 的协议核对。没有读取手机密码、Token、
+SharedPreferences 或业务数据库；没有对真实服务执行登录、资料、收藏读取或写入。
+没有自动切换账号，也没有批量收藏 286 本小说。账号修复不更改漫画索引表或章节文件。
+后续匿名接口和用户登录后的收藏验收分别见 §34、§35，不应把本段当成最终状态。
+
+### 33.2 样本和证据指纹
+
+| 对象 | SHA-256 / 摘要 |
+| --- | --- |
+| 安装样本与用户提供的 3.0.9 APK | `bdc96763c78bbc060a0f2f2c05024bb3379fad485be9843a82768f41c482194b` |
+| APK 签名证书 SHA-256 | `1800b4b60e9fee73916860717b97a11d89ed6c643a923b9c36a9c7b868c04c52` |
+| APK 签名证书 MD5 | `3af08590311032efe0660550a0563a53` |
+| 含 MainActivity 的已加载 DEX | `2b953e66f336230eea7a3820315c471fede2aaace80c665cc30ef6e0b89b6c2b` |
+
+关键本机产物：
+
+```text
+reverse_engineering/original_3.0.9_device/
+  base.apk
+  extracted/lib/arm64-v8a/libapp.so
+  blutter_out/pp.txt
+  runtime_code/codex-copy-code-audit/code-6d4c09d000.dex
+  runtime_java/sources/com/copymanga/app/MainActivity.java
+```
+
+文件名中的地址来自那次进程，不能在另一次启动复用。
+
+### 33.3 Android 17 / 加固处理经验
+
+1. 普通 APK 的 Java DEX 主要是壳，不能因为 JADX 里没有业务类就认定逻辑都在 Flutter。
+2. Frida 16.7.19 附加返回 agent connection closed；17.24.3 也在加载脚本时连接关闭。
+   未确定是系统兼容还是加固检查，不把推测写成结论，不继续反复注入。
+3. 只读 `/proc/<pid>/mem` 被拒绝；没有关闭 SELinux 或修改系统安全设置。
+4. 使用 `process_vm_readv` 成功读取符合条件的代码容器。实现保存在
+   `tool/reverse_apk_code.c`，校验进程必须为 `com.copymanga.app`，仅探测无名可读
+   private mapping 的页头，排除命名堆、栈、应用数据文件等区域。
+5. 只有匹配 DEX magic、112 字节 header、端序、尺寸和映射边界后才保存该 DEX，
+   不保存通用内存转储。9 个容器共 61,626,600 字节，在电脑上按桥接方法名筛选。
+6. 对含桥接类的单个 DEX 运行 JADX。总反编译有 7 处其他类错误；MainActivity 的
+   `getUmengString` 分派、`i()` 和 `j(byte[])` 方法恢复完整。
+
+只读复现示例（先以 adb 确认当前设备、包名、PID；不可复用这里的历史 PID）：
+
+```bash
+"$ANDROID_NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android26-clang" \
+  -O2 -Wall tool/reverse_apk_code.c -o build/reverse_apk_code
+adb push build/reverse_apk_code /data/local/tmp/codex-copy-dex-headers
+adb shell su -c 'chmod 700 /data/local/tmp/codex-copy-dex-headers'
+# 替换 PID 和新建的专用输出目录后运行：
+adb shell su -c '/data/local/tmp/codex-copy-dex-headers PID /data/local/tmp/copy-code-output'
+# 导出前按具体目录授予 shell 读取权限，再 adb pull；只处理刚生成的 DEX。
+rg -a -l 'getUmengString|com.hotmangas.plugins/utils' /local/pulled-code
+jadx --no-res -j 4 -d /local/runtime_java /local/matched-code.dex
+```
+
+此次临时网络隔离仅针对原版 App UID，带 `codex-copy-offline-audit` 注释；结束时已
+移除 IPv4/IPv6 对应规则、停止调试服务并移除端口转发。没有强停原版或清除其数据。
+临时网络隔离、服务和转发必须有清理步骤，不能让用户事后发现原版无法联网。
+
+### 33.4 原生桥接的完整证据链
+
+通道名 `com.hotmangas.plugins/utils`：
+
+```text
+getUmengString -> MainActivity.i()
+  -> PackageManager.GET_SIGNATURES
+  -> signatures[0].toByteArray()
+  -> MainActivity.j(byte[]) = MD5，逐字节补零、小写 hex
+getUmengChannel -> MainActivity.h() -> "copyApp"
+```
+
+`getUmengString` 的名称有误导性：不是 Umeng app key、设备 OAID 或账号秘密。
+输入是公开 APK 的签名证书，不需要提取私钥。用 `apksigner verify --print-certs`
+直接得到同一 MD5。阅读器使用此公开协议常量，不提取手机测试账号凭据。
+
+Flutter 链：
+
+| ARM64 AOT 地址 | 行为 |
+| --- | --- |
+| `0xa84f24` | 调用 `getUmengString` |
+| `0xa101e4` | 结果同时传给 tapString 和 umString 设置路径 |
+| `0xa10484` | 设置 `extra.tapString` |
+| `0xa10414`、`0xa10378` | UTF8 + MD5 后设置 `extra.umString` |
+| `0xa350ac`、`0xa35124` | 取 tapString 并调用签名函数 |
+| `0x308ac4` | 秒级时间戳、HMAC-SHA256、UTF8、小写 hex |
+| `0xa84e8c`、`0xa100a4`、`0xa1014c` | 原生渠道覆盖 extra.source |
+
+MD5 与 SHA256 的类型不要依靠混淆名猜：MD5 摘要构造使用四个初始 word（起始
+`67452301/efcdab89/...`），SHA256 使用八个 word；分别用于 umString 与 HMAC。
+
+### 33.5 初始参数不是最终参数
+
+`0x309d9c` 的初始 Map 是 Dio `extra`，不是最终 headers。字段偏移映射：
+`_Gw._Yzb` 在 `0xc` 为 headers，`_Gw.CCe` 在 `0x2c` 为 extra，
+`_Fw.jjb` 在 `0x4c` 为 queryParameters。
+
+| 字段 | 初始值 | 启动后的普通请求值 |
+| --- | --- | --- |
+| version | 3.0.0 | 3.0.9；`0xab7f54..0xab7f88` 覆盖 |
+| userAgent | 空 | COPY/3.0.9；`0xab7fac..0xab800c` |
+| source | #utm_source=FlutterTest | copyApp；原生渠道回调覆盖 |
+| webp | 0 | 1；`0xa0ee60..0xa0eec4` |
+| region | 0 | 用户线路值；账号保持选定国内节点的 0 |
+| tapString | 未设置 | APK 证书 MD5 |
+| umString | 未设置 | MD5(UTF8(tapString)) |
+
+日期 `dt` 在启动时构造：取当前墙钟文本前 19 位，加 `-0800` 再 DateTime.parse；
+header 使用 yyyy.MM.dd。不要把这个时区后缀当成原版 region。请求时间戳则每次更新。
+
+普通拦截器将 `extra.androidId` 映射为 header `device`，不是设备型号；Accept-Language
+从 extra 获取，没有值时空字符串。`deviceInfo`、标识和 pseudoID 使用阅读器自己的
+本机身份，不复制原版安装的实例标识。原版 pseudoID 为持久化的 16 位大小写字母数字；
+0.5.0+32 已改为本应用自己生成并持久化 16 位 base62 随机值，不复制原版 App 的实例值。
+
+### 33.6 登录、表单与收藏
+
+登录 `0xa586f8` 使用 `Random.secure().nextInt(9999)`，随后转字符串；密码为
+`Base64(UTF8(password + "-" + salt))`。旧固定 1729 已去掉。
+
+登录与小说收藏共同调用 `0xa36098 -> 0xa3617c -> 0xa36278`。在
+`0xa361ec..0xa36228` 执行 `data.addAll(options.extra)`，故不能只发送用户名、密码、
+salt 或 book_id、is_collect 三/两个业务字段。发送格式是 URL-encoded 表单，不是 JSON。
+登录的 header 和 form 中 authorization 均为空 `Token `，不继承已有登录用户。
+
+小说收藏写路径 `0xa93480..0xa93514` 确认字段 `book_id` 和 `is_collect=1/0`，
+endpoint 为 `/api/v3/member/collect/book`。读取使用复数 `/books`。查询自动补 platform=3。
+收藏分页 UI 默认值尚未全量核验，不因两个固定样例成功就宣称所有分页完全一致。
+
+### 33.7 代码落地与故障保护
+
+- `CopyRequestProtocol` 单独保存上述常量、签名、dt、公共字段和表单合并。
+- 0.5.0+32 所有普通 API（含匿名、发现、测速）统一使用它，没有账号/匿名双轨签名。
+- 匿名 API 使用原版未登录空 Token；图片/TXT CDN 无 API 头；都不附带账号凭据。
+- 账号串行，完成后间隔至少 1 秒，相同在途 GET 合并，重复登录/刷新按钮不会重复并发。
+- 账号请求固定选定节点，POST 超时、404、503、坏 JSON、重定向均不跨节点自动重放。
+- 429 尊重 Retry-After（秒数或 HTTP 日期）；明确限制信息锁住本次会话后续账号请求。
+- 普通密码错误不误标风控；账号切换取消等待中的旧 token 请求。
+- 小说批量收藏首次失败停止，不继续写也不再验证读取，保留失败记录和本地小说。
+- 日志只记状态/是否有 message，不记录密码、编码密码、Token、设备标识或原始服务器消息。
+
+这些保护是客户端行为约束，不是解除服务器限制或保证账号永不被限制的手段。
+
+### 33.8 可独立重放的离线向量与回归
+
+```text
+timestamp: 1785328496
+tapString: 3af08590311032efe0660550a0563a53
+umString: b4c89ca4104ea9a97750314d791520ac
+X-Auth-Signature:
+48f772e76c034d8281f1cab1bc52f5d25597ad1c6ed44642780b5d7e94954471
+```
+
+```bash
+printf '%s' 3af08590311032efe0660550a0563a53 | openssl dgst -md5
+printf '%s' 1785328496 | openssl dgst -sha256 -hmac 3af08590311032efe0660550a0563a53
+flutter test --no-pub test/account_request_safety_test.dart \
+  test/copy_api_protocol_test.dart test/novel_api_test.dart
+```
+
+针对性 39 项通过，包括真正经过 Dio 编码后的表单字节、Token 隔离、失败停止和独立向量。
+后续实机验收应在用户确认账号可正常使用后，只做一次新测试账号登录、一次资料和一次
+收藏读取；先对照状态再决定单本收藏写入，不能直接把整库当压力测试。
+
+`tool/inspect_copy_aot.py` 可在 Blutter 函数 size=-1 时辅助 `llvm-objdump` 标注对象池：
+
+```bash
+python3 tool/inspect_copy_aot.py --start 0xa101e4 --end 0xa104e8
+python3 tool/inspect_copy_aot.py --find 'getUmengString|tapString'
+```
+
+它不替代数据流分析：会失效的寄存器基址、Dart tagged integer、DateTime 的 UTC/本地
+行为以及异步启动覆盖都要回到原指令核对。没有对应样本的地址不能直接复用。
+
+## 34. 全请求复核与匿名下载约定（2026-10-27，0.5.0+32）
+
+### 34.1 范围与不变量
+
+用户要求登录、资料、收藏、搜索与匿名功能均按原版 APK 参数实现；随后明确要求继续
+将匿名阅读图片保存为 ZIP，不使用原版需登录的下载专用接口。这个产品差异是有意保留，
+不能在下次维护时误改回登录下载，也不能把此差异描述为“原版所有行为一模一样”。
+
+- APK/API 版本固定到此次样本 3.0.9，不代表以后不会改变。
+- 共用 CopyRequestProtocol；页面不拼签名/版本/表单 extra。
+- 唯一带会员 Token 的当前入口：profile、漫画收藏、小说收藏读取/写入。登录为空 Token。
+- 搜索、详情、章节、小说卷、节点发现/测速始终按未登录状态；即使阅读器已经登录也不变。
+- 图片、封面、头像、小说 TXT/插图不带 API Header；账号 POST 不跟随重定向。
+- 小说收藏分页改为 limit=18、offset、free_type=1、ordering；调用者字段见 0x4b08f8..0x4b09b0。
+- 原版小说 /volumes 没有分页/ordering query（0x5d6f8c -> 0xa7d0ac），只由拦截器补 platform。
+  不再套用收藏分页；响应若声明 total 大于实际 list，视为不完整而非悄悄漏卷。
+- 小说详情同漫画详情补 in_mainland/request_id，调用证据 0x5d685c..0x5d68d8。
+
+### 34.2 Android 设备字段的数据流证据
+
+不要把内部命名 androidId 按字面解释成 Settings.Secure.ANDROID_ID。
+
+1. device_info_plus 工厂 0x515654 分别从 Map 的 device/id/model 读取值。
+2. 构造器 0x5160b8：device 放 object+0xf，id 放 +0x13，model 放 +0x17。
+3. 启动初始化 0xab7e44 将 +0x13 传给 androidId setter 0xa0ec58。
+4. 0xab7e88 拼 +0x17、短横线、+0xf 后传给 deviceInfo setter 0xa0eb20。
+5. 普通拦截器将 extra.androidId 发成 header.device。
+
+因此 Android 桥接返回 Build.ID 与 Build.MODEL-Build.DEVICE。此次只读取 adb 的三项
+公开系统属性做匿名测试，没有读取官方 App 的账号、密码、Token 或安装私有 ID。
+原版 pseudoID 生成器 0xa0eecc 的字符表为 0-9、a-z、A-Z，长度 16，首次生成后持久化。
+阅读器自己的值只保存到本地应用 DB.device_identity，不写漫画库索引，不导出其记录，
+导入别的设备应用数据也不会覆盖当前安装身份。平台初始化失败时禁止向服务端发伪造零值。
+
+### 34.3 逐接口验证与在线结果
+
+独立 mock adapter 检查最终 RequestOptions 和 Dio 实际编码的 POST 字节，覆盖：
+
+| 功能 | 方法/路径 | 账号凭据 |
+| --- | --- | --- |
+| 登录 | POST /login | 空 Token，带业务字段与公共 extra |
+| 资料 | GET /member/info | 当前 Token |
+| 漫画/小说收藏 | GET /member/collect/comics、/books | 当前 Token |
+| 小说收藏变更 | POST /member/collect/book | 当前 Token，book_id/is_collect |
+| 漫画/小说搜索 | GET /search/comic、/books | 空 Token |
+| 漫画/小说详情 | GET /comic2/{path}、/book/{path} | 空 Token |
+| 漫画目录 | GET /comic/{path}/group/{group}/chapters | 空 Token |
+| 在线阅读及 ZIP 图片地址 | GET /comic/{path}/chapter2/{id} | 空 Token |
+| 小说目录/卷内容 | GET /book/{path}/volumes、/volume/{id} | 空 Token |
+| 节点发现/测速 | GET /system/network2 | 空 Token |
+| CDN 资源 | GET 返回的资源 URL | 完全无 API Header |
+
+表内 API 路径均以 /api/v3 开头，query 一律补整数 platform=3。
+新增会员接口必须进显式白名单；分类/HTTP 方法不匹配在任何网络 I/O 前失败。
+
+此次少量在线检查：直接 HTTP/2 探测国内引导节点超时，不据此认定 API 失效；改为单次请求
+显式使用本机代理 127.0.0.1:7890 后成功，没有更改系统/Git/应用代理配置。
+network2 从 api.copy202602.com 返回国内节点 api.copy202601.com。
+所有测试均为匿名，无账号读取/登录/收藏变更：
+
+- 漫画与小说搜索均返回 code 200 和有效 path_word。
+- 异世界叔叔详情返回 3 个组；默认组目录 total=119、首批=100。
+- chapter2 第01话返回 15 张图片，首张 CDN 实取 194398 字节，WebP 魔数正确。
+- 无职转生小说详情标识匹配；volumes 一次返回 34/34 卷；首卷返回 34 项内容与 TXT 地址。
+- TXT CDN 实取 333415 字节，UTF-8 可解码；没有打印正文、写入漫画库或批量下载。
+- 原版 chapter2download 匿名返回 401（No credentials provided）；按用户后续指示，不使用
+  此接口，继续保存匿名阅读图片。
+
+### 34.4 测试边界与待验证项
+
+当前已做证书/算法独立向量、请求矩阵、设备标识持久化与迁移隔离、节点故障切换、
+账号串行/429 冷却/限制停止、阅读滚动/JXL/下载 ZIP 等离线回归。
+截至 §34 匿名验证阶段，账号真实服务端验收尚未做；后续已完成的账号收藏验收见 §35。
+这些验收不保证既有限制解除，也不承诺永不触发服务器规则。
+分页 UI 的所有默认值、广告状态 request_id 的完整生命周期、原版 iOS 客户端原生元数据
+未逐字节抓包核验；目前 request_id 按无广告会话为空。原版 Android 的协议证据不能被
+扩张成“原版 iOS/macOS 全部参数已证明一致”。节点自动测速、账号限速和停止重放是
+阅读器自己的行为约束，不是原版调度次数的复制。
+
+一次性 Python 导入脚本 sync_novels.py 的旧网络 API 入口已显式停用，保留本地转换、
+报告和离线 FakeClient 测试，避免以后绕过共享请求层继续发旧签名。阅读器的小说功能不受影响。
+
+复核命令：
+
+```bash
+dart analyze --fatal-infos
+flutter test --no-pub --concurrency=1 test/request_profile_matrix_test.dart \
+  test/account_request_safety_test.dart test/copy_device_identity_test.dart \
+  test/copy_api_protocol_test.dart test/novel_api_test.dart test/download_controller_test.dart
+python3 tool/test_novel_sync.py -v
+```
+
+## 35. 漫画与小说收藏变更（0.5.1+33）
+
+同一样本 AOT `0xa91554..0xa915e0` 确认漫画变更的字段为 `comic_id` 与
+`is_collect`（布尔映射到整数 1/0），路径 `/api/v3/member/collect/comic`，
+调用 `0xa36098` 公共 POST 包装。小说对应 `0xa93480..0xa93514`，路径
+`/api/v3/member/collect/book`，字段 `book_id` 与 `is_collect`。
+两个接口都必须经过公共表单合并、账号节点、当前 Token 和禁止重放策略；不能把
+comic_id/book_id 混用，也不能用返回收藏列表的复数路径提交变更。
+
+代码中 `CopyApiProtocol.isAccountWrite` 显式列出登录及这两个写入口，普通匿名
+内容入口仍不携带 Token。控制器先核对服务器状态，已有目标状态时跳过 POST；
+变更后再次读取列表验证，写入结果不明确时先停止，不自动重试。
+
+真实小说单本验收（2026-10-27，0.5.0+32）：用户亲自登录 Mac 版后，现有小说收藏
+列表可读取；通过详情页添加《0能者九條湊》成功，随后的服务器回查为 5 部（原有
+4 部）。这一结果仅证明当时该账号该小说的流程成功，不构成永久无风控保证。
+
+新增回归在 `favorite_button_test.dart`、`favorite_mutations_test.dart` 和
+`request_profile_matrix_test.dart`：覆盖按钮状态、取消确认、双击合并、切换账号
+丢弃旧结果、写入失败不重发、漫画/小说字段区分、批量跳过已有及本地作品、首错停止。
+
+0.5.1+33 真实验收（2026-10-27，Mac 版）：
+
+- 漫画详情页添加《12歲》，回读收藏列表由 430 部变为 431 部，按钮显示“已收藏”。
+- 小说批量添加前 5 部收藏；本地 291 部小说中 286 部有在线标识，3 部已收藏，
+  因此串行添加 283 部。添加及最终全量分页回查均成功，失败 0，回查总数 288。
+- 按 UUID 将刚回查的账号收藏缓存与外置库小说表作只读集合比较：286/286 全部包含，
+  缺失 0；额外保留的原有收藏为《我們的重製人生》《戰鬥妖精雪風》。
+- 5 部 `local-` 小说没有提交线上收藏，仍在原库。共享漫画索引及小说文件未因收藏操作变更。
+- 本次 `dart analyze --fatal-infos` 通过；完整回归 124 通过、2 条条件测试跳过。
+  Android、iOS 标准 ID、iPad 兼容 ID、macOS 都已构建；真实服务器收藏操作是在 Mac 上验收，
+  不将跨平台编译成功表述为所有移动设备均已逐一实机验收。

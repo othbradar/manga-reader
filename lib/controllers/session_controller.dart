@@ -37,7 +37,11 @@ class SessionController extends ChangeNotifier {
       try {
         await refreshProfile();
       } on CopyApiException catch (exception) {
-        if (exception.code == 401) await logout();
+        if (exception.code == 401) {
+          await logout();
+        } else {
+          error = exception.message;
+        }
       }
     }
     ready = true;
@@ -45,6 +49,7 @@ class SessionController extends ChangeNotifier {
   }
 
   Future<bool> login(String user, String password) async {
+    if (loading) return false;
     if (user.trim().isEmpty || password.isEmpty) {
       error = '请输入账号和密码';
       notifyListeners();

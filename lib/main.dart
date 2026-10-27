@@ -11,6 +11,8 @@ import 'controllers/favorites_controller.dart';
 import 'controllers/library_controller.dart';
 import 'controllers/reading_history_controller.dart';
 import 'controllers/session_controller.dart';
+import 'controllers/novel_controller.dart';
+import 'services/novel_store.dart';
 import 'pages/app_shell.dart';
 import 'services/chinese_search_normalizer.dart';
 import 'services/copy_api_protocol.dart';
@@ -52,6 +54,7 @@ class _CopyMangaReaderBootstrapState extends State<CopyMangaReaderBootstrap> {
   late final SessionController _session;
   late final FavoritesController _favorites;
   late final DownloadController _downloads;
+  late final NovelController _novels;
 
   @override
   void initState() {
@@ -74,12 +77,18 @@ class _CopyMangaReaderBootstrapState extends State<CopyMangaReaderBootstrap> {
     _session = SessionController(_client);
     _favorites = FavoritesController(database: _database, client: _client);
     _downloads = DownloadController(database: _database, client: _client);
+    _novels = NovelController(
+      store: NovelStore(_database),
+      client: _client.novels,
+    );
     unawaited(_initialize());
   }
 
   Future<void> _initialize() async {
-    _client.setDeviceIdentity(await CopyDeviceIdentityService.load());
     await _localDatabase.open();
+    _client.setDeviceIdentity(
+      await CopyDeviceIdentityService.load(_localDatabase),
+    );
     await _appearance.initialize();
     await _history.initialize();
     await _normalizer.loadAssets();
@@ -105,10 +114,12 @@ class _CopyMangaReaderBootstrapState extends State<CopyMangaReaderBootstrap> {
         _client.setAuthenticationDomain(authenticationDomain);
       }
     }
-    await _session.restore();
     if (_library.ready) {
       await Future.wait([_favorites.loadCache(), _downloads.initialize()]);
+      await _novels.initialize();
     }
+    // Local novels must be usable even when account/profile requests are slow.
+    await _session.restore();
   }
 
   @override
@@ -116,6 +127,7 @@ class _CopyMangaReaderBootstrapState extends State<CopyMangaReaderBootstrap> {
     unawaited(_database.close());
     unawaited(_localDatabase.close());
     _downloads.dispose();
+    _novels.dispose();
     _appearance.dispose();
     _favorites.dispose();
     _session.dispose();
@@ -137,6 +149,7 @@ class _CopyMangaReaderBootstrapState extends State<CopyMangaReaderBootstrap> {
         ChangeNotifierProvider.value(value: _session),
         ChangeNotifierProvider.value(value: _favorites),
         ChangeNotifierProvider.value(value: _downloads),
+        ChangeNotifierProvider.value(value: _novels),
       ],
       child: const CopyMangaReaderApp(),
     );

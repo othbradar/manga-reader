@@ -4,6 +4,7 @@ import 'account_page.dart';
 import 'favorites_page.dart';
 import 'library_page.dart';
 import 'search_page.dart';
+import 'novel_pages.dart';
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
@@ -17,9 +18,9 @@ class _AppShellState extends State<AppShell> {
 
   static const _titles = ['漫画库', '在线搜索', '收藏', '我的'];
   static const _pages = [
-    LibraryPage(),
-    SearchPage(),
-    FavoritesPage(),
+    MediaTabs(comics: LibraryPage(), novels: NovelLibraryPage()),
+    MediaTabs(comics: SearchPage(), novels: NovelSearchPage()),
+    MediaTabs(comics: FavoritesPage(), novels: NovelFavoritesPage()),
     AccountPage(),
   ];
   static const _destinations = [

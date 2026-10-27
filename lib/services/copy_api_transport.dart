@@ -1,17 +1,27 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
 import 'copy_api_protocol.dart';
+import 'copy_request_protocol.dart';
 
 typedef CopyApiResultsValidator = bool Function(Object? results);
 
 class CopyApiException implements Exception {
-  const CopyApiException(this.message, {this.code});
+  const CopyApiException(
+    this.message, {
+    this.code,
+    this.accountRestricted = false,
+    this.retryAfter,
+  });
 
   final String message;
   final int? code;
+  final bool accountRestricted;
+  final Duration? retryAfter;
 
   @override
   String toString() => message;
@@ -38,8 +48,14 @@ final class CopyApiTransport {
     Dio? dio,
     Dio? imageDio,
     String apiDomain = CopyApiProtocol.defaultDomain,
+    DateTime Function()? requestClock,
+    this.accountRequestInterval = const Duration(seconds: 1),
   }) : _dio = dio ?? Dio(),
        _imageDio = imageDio ?? dio ?? Dio(),
+       _requestClock = requestClock ?? DateTime.now,
+       _startupDate = CopyRequestProtocol.startupDate(
+         (requestClock ?? DateTime.now)(),
+       ),
        _apiDomain = CopyApiProtocol.normalizeDomain(apiDomain) {
     if (_apiDomain.isEmpty) {
       _apiDomain = CopyApiProtocol.defaultDomain;
@@ -52,6 +68,15 @@ final class CopyApiTransport {
 
   final Dio _dio;
   final Dio _imageDio;
+  final Duration accountRequestInterval;
+  final DateTime Function() _requestClock;
+  final DateTime _startupDate;
+  Future<void> _accountTail = Future<void>.value();
+  final Map<String, Future<dynamic>> _accountReads = {};
+  DateTime? _lastAccountRequestEnd;
+  DateTime? _accountRetryNotBefore;
+  CopyApiException? _accountRestriction;
+  int _tokenRevision = 0;
   final List<String> _dynamicDomains = <String>[];
   final List<String> _authenticationDomains = <String>[];
   final Map<String, bool> _domainMainland = <String, bool>{};
@@ -118,10 +143,15 @@ final class CopyApiTransport {
   bool get usesAutomaticDomain => !_manualDomain;
   bool get usesAutomaticAuthenticationDomain => !_manualAuthenticationDomain;
   bool get hasToken => _token.isNotEmpty;
+  int get sessionRevision => _tokenRevision;
   CopyApiRoute get apiRoute => _apiRoute;
   bool get inMainland => _isMainlandDomain(_apiDomain);
 
-  void setToken(String token) => _token = token.trim();
+  void setToken(String token) {
+    final value = token.trim();
+    if (_token != value) _tokenRevision++;
+    _token = value;
+  }
 
   void setDeviceIdentity(CopyDeviceIdentity identity) => _identity = identity;
 
@@ -215,11 +245,115 @@ final class CopyApiTransport {
     Map<String, dynamic>? data,
     bool authenticated = false,
     bool formEncoded = false,
-    bool includeEmptyAuthorization = false,
     CopyApiResultsValidator? validateResults,
     String invalidResultsMessage = '节点返回了空数据',
+  }) {
+    if (authenticated != CopyApiProtocol.requiresAuthentication(path)) {
+      return Future.error(const CopyApiException('接口登录凭据配置不匹配，已阻止请求'));
+    }
+    if ((authenticated || path == CopyApiProtocol.loginPath) &&
+        method.toUpperCase() !=
+            (CopyApiProtocol.isAccountWrite(path) ? 'POST' : 'GET')) {
+      return Future.error(const CopyApiException('账号接口请求方式不匹配，已阻止请求'));
+    }
+    if (!path.startsWith('/api/v3/') ||
+        path.contains('?') ||
+        path.contains('#')) {
+      return Future.error(const CopyApiException('无效的 API 请求路径'));
+    }
+    Future<dynamic> request() => _requestResults(
+      path,
+      method: method,
+      query: query,
+      data: data,
+      authenticated: authenticated,
+      formEncoded: formEncoded,
+      validateResults: validateResults,
+      invalidResultsMessage: invalidResultsMessage,
+    );
+    if (authenticated || path == CopyApiProtocol.loginPath) {
+      if (authenticated && method.toUpperCase() == 'GET') {
+        final key = jsonEncode([_tokenRevision, path, query]);
+        final pending = _accountReads[key];
+        if (pending != null) return pending;
+        Future<dynamic> read() async {
+          try {
+            return await _accountRequest(request, authenticated: true);
+          } finally {
+            _accountReads.remove(key);
+          }
+        }
+
+        return _accountReads[key] = read();
+      }
+      return _accountRequest(request, authenticated: authenticated);
+    }
+    return request();
+  }
+
+  // A shared lane for comic/novel favorites and login/profile requests.
+  // Content and image downloads remain anonymous and do not enter this lane.
+  Future<dynamic> _accountRequest(
+    Future<dynamic> Function() request, {
+    required bool authenticated,
   }) async {
+    final previous = _accountTail;
+    final done = Completer<void>();
+    final tokenRevision = _tokenRevision;
+    _accountTail = done.future;
+    var started = false;
+    try {
+      await previous;
+      final lastEnd = _lastAccountRequestEnd;
+      if (lastEnd != null) {
+        final wait =
+            accountRequestInterval - DateTime.now().difference(lastEnd);
+        if (wait > Duration.zero) await Future<void>.delayed(wait);
+      }
+      if (_accountRestriction case final restriction?) throw restriction;
+      final retryAt = _accountRetryNotBefore;
+      if (retryAt != null && DateTime.now().isBefore(retryAt)) {
+        throw CopyApiException(
+          '账号请求暂时限流，请稍后再试',
+          code: 429,
+          retryAfter: retryAt.difference(DateTime.now()),
+        );
+      }
+      if (authenticated && tokenRevision != _tokenRevision) {
+        throw const CopyApiException('账号已切换，已取消旧账号的待处理请求');
+      }
+      started = true;
+      return await request();
+    } on CopyApiException catch (error) {
+      if (error.accountRestricted) _accountRestriction = error;
+      if (error.code == 429) {
+        // Do not extend the server's cooldown for requests rejected locally.
+        if (started) {
+          _accountRetryNotBefore = DateTime.now().add(
+            error.retryAfter ?? const Duration(minutes: 1),
+          );
+        }
+      }
+      rethrow;
+    } finally {
+      if (started) _lastAccountRequestEnd = DateTime.now();
+      done.complete();
+    }
+  }
+
+  Future<dynamic> _requestResults(
+    String path, {
+    required String method,
+    Map<String, dynamic>? query,
+    Map<String, dynamic>? data,
+    required bool authenticated,
+    required bool formEncoded,
+    CopyApiResultsValidator? validateResults,
+    required String invalidResultsMessage,
+  }) async {
+    _requireIdentity();
     if (authenticated) _requireLogin();
+    final tokenRevision = _tokenRevision;
     final isLogin = path == CopyApiProtocol.loginPath;
     final Set<String> candidates;
     if (isLogin || authenticated) {
@@ -239,8 +373,16 @@ final class CopyApiTransport {
     }
     _CopyNodeFailure? lastFailure;
 
-    for (final domain in candidates) {
+    // Account requests stay on the selected domestic node. An ambiguous POST
+    // result must never be replayed automatically, even after a timeout/404.
+    final accountRequest = isLogin || authenticated;
+    for (final domain in accountRequest ? candidates.take(1) : candidates) {
       try {
+        // Discovery can await network I/O; don't send a newly selected token
+        // as the continuation of a request scheduled for the previous user.
+        if (authenticated && tokenRevision != _tokenRevision) {
+          throw const CopyApiException('账号已切换，已取消旧账号的待处理请求');
+        }
         final domainQuery = query == null
             ? null
             : Map<String, dynamic>.from(query);
@@ -255,7 +397,6 @@ final class CopyApiTransport {
           data: data,
           formEncoded: formEncoded,
           authenticated: authenticated,
-          includeEmptyAuthorization: includeEmptyAuthorization,
         );
         if (validateResults != null && !validateResults(results)) {
           throw _CopyNodeFailure(invalidResultsMessage);
@@ -279,6 +420,9 @@ final class CopyApiTransport {
         }
         rethrow;
       } on _CopyNodeFailure catch (failure) {
+        if (accountRequest) {
+          throw CopyApiException('账号节点请求失败，未自动重试：${failure.message}');
+        }
         lastFailure = failure;
       }
     }
@@ -324,42 +468,70 @@ final class CopyApiTransport {
     Map<String, dynamic>? data,
     required bool formEncoded,
     required bool authenticated,
-    required bool includeEmptyAuthorization,
   }) async {
     try {
       final isLogin = path == CopyApiProtocol.loginPath;
+      final accountRequest = isLogin || authenticated;
+      final commonParameters = CopyRequestProtocol.commonParameters(
+        identity: _identity,
+        date: _startupDate,
+        region: accountRequest ? '0' : _regionForDomain(domain),
+        // Login and ALL content endpoints use the logged-out request profile.
+        token: authenticated && !isLogin ? _token : '',
+      );
       if (isLogin && kDebugMode) {
         debugPrint(
           '[CopyLogin] request host=$domain '
-          'version=${CopyApiProtocol.loginVersion} '
-          'platform=${CopyApiProtocol.loginPlatform} '
-          'region=${CopyApiProtocol.loginRegion}',
+          'version=${CopyRequestProtocol.version} platform=3 region=0',
         );
       }
       final response = await _dio.request<dynamic>(
         'https://$domain$path',
-        queryParameters: query,
-        data: data,
+        queryParameters: {...?query, 'platform': 3},
+        data: method.toUpperCase() == 'POST'
+            ? CopyRequestProtocol.formBody(
+                data: data ?? const {},
+                commonParameters: commonParameters,
+              )
+            : data,
         options: Options(
           method: method,
-          contentType: formEncoded ? Headers.formUrlEncodedContentType : null,
-          headers: isLogin
-              ? CopyApiProtocol.loginHeaders()
-              : CopyApiProtocol.headers(
-                  token: authenticated ? _token : null,
-                  includeEmptyAuthorization: includeEmptyAuthorization,
-                  region: _regionForDomain(domain),
-                  identity: _identity,
-                ),
+          followRedirects: !accountRequest,
+          validateStatus: accountRequest ? (status) => status != null : null,
+          contentType: formEncoded || method.toUpperCase() == 'POST'
+              ? Headers.formUrlEncodedContentType
+              : null,
+          headers: CopyRequestProtocol.headers(
+            commonParameters: commonParameters,
+            nativeMaterial: CopyRequestProtocol.certificateMd5,
+            now: _requestClock(),
+          ),
         ),
       );
       final status = response.statusCode ?? 0;
+      if (accountRequest && (status == 429 || status == 403)) {
+        Map<String, dynamic> errorMap;
+        try {
+          errorMap = _decodeResponseMap(response.data, status: status);
+        } on _CopyNodeFailure {
+          errorMap = const {};
+        }
+        final message =
+            errorMap['message']?.toString() ??
+            (status == 429 ? '账号请求暂时限流，请稍后再试' : '服务器拒绝了账号请求');
+        throw CopyApiException(
+          message,
+          code: status,
+          accountRestricted: _isAccountRestriction(message),
+          retryAfter: _retryAfter(response.headers.value('retry-after')),
+        );
+      }
       final map = _decodeResponseMap(response.data, status: status);
       final code = _asInt(map['code'], fallback: status);
       if (isLogin && kDebugMode) {
         debugPrint(
           '[CopyLogin] response host=$domain status=$status code=$code '
-          'message=${map['message'] ?? ''}',
+          'hasMessage=${map['message'] != null}',
         );
       }
 
@@ -372,9 +544,13 @@ final class CopyApiTransport {
         );
       }
       if (status != 200 || code != 200) {
+        final message =
+            map['message']?.toString() ?? '请求失败（HTTP $status，code $code）';
         throw CopyApiException(
-          map['message']?.toString() ?? '请求失败（HTTP $status，code $code）',
+          message,
           code: code,
+          accountRestricted: accountRequest && _isAccountRestriction(message),
+          retryAfter: _retryAfter(response.headers.value('retry-after')),
         );
       }
       return map['results'];
@@ -383,9 +559,37 @@ final class CopyApiTransport {
     } on _CopyNodeFailure {
       rethrow;
     } on DioException catch (error) {
+      // A failed favorite mutation must not be mistaken for an empty list or
+      // silently replayed on every node. Keep diagnostics free of credentials.
+      if (path == CopyApiProtocol.novelCollectPath &&
+          error.response?.statusCode != null) {
+        throw CopyApiException(
+          '小说收藏提交失败（HTTP ${error.response!.statusCode}，$domain）',
+          code: error.response!.statusCode,
+        );
+      }
       throw _CopyNodeFailure(_networkErrorMessage(error));
     } on FormatException {
       throw const _CopyNodeFailure('服务器返回了无效 JSON');
+    }
+  }
+
+  static bool _isAccountRestriction(String message) => RegExp(
+    r'风控|風控|封控|解封|账号.{0,8}(限制|受限|封禁)|帳[號戶].{0,8}(限制|受限|封禁)|account.{0,20}(restricted|suspended|blocked)',
+    caseSensitive: false,
+  ).hasMatch(message);
+
+  static Duration? _retryAfter(String? value) {
+    final seconds = int.tryParse(value ?? '');
+    if (seconds != null) {
+      return seconds >= 0 ? Duration(seconds: seconds) : null;
+    }
+    if (value == null) return null;
+    try {
+      final remaining = HttpDate.parse(value).difference(DateTime.now());
+      return remaining > Duration.zero ? remaining : Duration.zero;
+    } on FormatException {
+      return null;
     }
   }
 
@@ -459,6 +663,7 @@ final class CopyApiTransport {
   }
 
   Future<void> _refreshAuthenticationDomains() async {
+    _requireIdentity();
     _lastAuthenticationDiscoveryAttempt = DateTime.now();
     final discovered = <String>{
       if (_authenticationDomain.isNotEmpty) _authenticationDomain,
@@ -473,6 +678,8 @@ final class CopyApiTransport {
             headers: CopyApiProtocol.headers(
               region: CopyApiRoute.mainland.region,
               identity: _identity,
+              startupDate: _startupDate,
+              now: _requestClock(),
             ),
             connectTimeout: const Duration(seconds: 8),
             receiveTimeout: const Duration(seconds: 12),
@@ -506,6 +713,7 @@ final class CopyApiTransport {
   }
 
   Future<void> _refreshDynamicDomains() async {
+    _requireIdentity();
     _lastDiscoveryAttempt = DateTime.now();
     final discovered = <String>{};
     final discoveredMainland = <String, bool>{};
@@ -519,6 +727,8 @@ final class CopyApiTransport {
             headers: CopyApiProtocol.headers(
               region: _regionForDiscoveryDomain(discoveryDomain),
               identity: _identity,
+              startupDate: _startupDate,
+              now: _requestClock(),
             ),
             connectTimeout: const Duration(seconds: 8),
             receiveTimeout: const Duration(seconds: 12),
@@ -608,14 +818,16 @@ final class CopyApiTransport {
     final stopwatch = Stopwatch()..start();
     try {
       final response = await _dio.get<dynamic>(
-        'https://$domain${CopyApiProtocol.searchPath}',
-        queryParameters: CopyApiProtocol.nodeProbeQuery,
+        'https://$domain${CopyApiProtocol.networkPath}',
+        queryParameters: CopyApiProtocol.networkQuery,
         options: Options(
           headers: CopyApiProtocol.headers(
             region: forceMainland
                 ? CopyApiRoute.mainland.region
                 : _regionForDomain(domain),
             identity: _identity,
+            startupDate: _startupDate,
+            now: _requestClock(),
           ),
           connectTimeout: const Duration(seconds: 5),
           receiveTimeout: const Duration(seconds: 5),
@@ -628,7 +840,7 @@ final class CopyApiTransport {
       if (status != 200 ||
           _asInt(map['code'], fallback: status) != 200 ||
           results is! Map ||
-          results['list'] is! List) {
+          results['api'] is! List) {
         return null;
       }
       return stopwatch.elapsedMilliseconds;
@@ -698,7 +910,13 @@ final class CopyApiTransport {
 
   void _requireLogin() {
     if (_token.isEmpty) {
-      throw const CopyApiException('请先登录拷贝漫画');
+      throw const CopyApiException('请先登录拷贝漫画', code: 401);
+    }
+  }
+
+  void _requireIdentity() {
+    if (!_identity.isReady) {
+      throw const CopyApiException('设备请求参数尚未初始化，请重启应用后重试；本地阅读不受影响');
     }
   }
 

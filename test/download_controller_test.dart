@@ -187,60 +187,70 @@ void main() {
     }
   });
 
-  test('章节图片接口瞬时返回未认证时会自动重试', () async {
-    final temporary = await Directory.systemTemp.createTemp(
-      'download-content-retry-test-',
-    );
-    final local = LocalAppDatabase(
-      factory: databaseFactoryFfi,
-      supportDirectoryProvider: () async =>
-          Directory('${temporary.path}/app-support'),
-    );
-    final library = LibraryDatabase(localDatabase: local);
-    await library.open(Directory('${temporary.path}/library'));
-    final client = _RetryingChapterContentCopyClient();
-    final controller = DownloadController(
-      database: library,
-      client: client,
-      pageRetryBaseDelay: Duration.zero,
-    );
+  for (final failureCode in [503, 401, 403, 429]) {
+    test('下载元数据 $failureCode：网络故障重试，账号错误停止', () async {
+      final temporary = await Directory.systemTemp.createTemp(
+        'download-content-retry-test-',
+      );
+      final local = LocalAppDatabase(
+        factory: databaseFactoryFfi,
+        supportDirectoryProvider: () async =>
+            Directory('${temporary.path}/app-support'),
+      );
+      final library = LibraryDatabase(localDatabase: local);
+      await library.open(Directory('${temporary.path}/library'));
+      final client = _RetryingChapterContentCopyClient(failureCode);
+      final controller = DownloadController(
+        database: library,
+        client: client,
+        pageRetryBaseDelay: Duration.zero,
+        automaticTaskRetryDelays: const [Duration(milliseconds: 10)],
+      );
 
-    try {
-      await controller.initialize();
-      await controller.enqueue(
-        const Comic(
-          uuid: 'comic-content-retry',
-          pathWord: 'comic-content-retry',
-          title: '章节地址重试',
-          authors: '作者',
-        ),
-        const <Chapter>[
-          Chapter(
-            uuid: 'chapter-content-retry',
-            comicUuid: 'comic-content-retry',
-            groupPathWord: 'default',
-            groupName: '默认',
-            title: '第1话',
-            order: 1,
+      try {
+        await controller.initialize();
+        await controller.enqueue(
+          const Comic(
+            uuid: 'comic-content-retry',
+            pathWord: 'comic-content-retry',
+            title: '章节地址重试',
+            authors: '作者',
           ),
-        ],
-      );
+          const <Chapter>[
+            Chapter(
+              uuid: 'chapter-content-retry',
+              comicUuid: 'comic-content-retry',
+              groupPathWord: 'default',
+              groupName: '默认',
+              title: '第1话',
+              order: 1,
+            ),
+          ],
+        );
 
-      await controller.resumeAll();
-      await _waitUntil(
-        () => controller.tasks.single.state == DownloadState.completed,
-      );
+        await controller.resumeAll();
+        await _waitUntil(
+          () =>
+              controller.tasks.single.state ==
+              (failureCode == 503
+                  ? DownloadState.completed
+                  : DownloadState.failed),
+        );
 
-      expect(client.chapterContentCalls, 3);
-      expect(client.domainRefreshCalls, 2);
-      expect(controller.tasks.single.errorMessage, isEmpty);
-    } finally {
-      controller.dispose();
-      await library.close();
-      await local.close();
-      await temporary.delete(recursive: true);
-    }
-  });
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        expect(client.chapterContentCalls, failureCode == 503 ? 3 : 1);
+        expect(client.domainRefreshCalls, failureCode == 503 ? 1 : 0);
+        if (failureCode == 503) {
+          expect(controller.tasks.single.errorMessage, isEmpty);
+        }
+      } finally {
+        controller.dispose();
+        await library.close();
+        await local.close();
+        await temporary.delete(recursive: true);
+      }
+    });
+  }
 
   test('单页重试耗尽后会在后台重新取章节地址并继续任务', () async {
     final temporary = await Directory.systemTemp.createTemp(
@@ -410,6 +420,8 @@ final class _RetryingPageCopyClient extends CopyClient {
 }
 
 final class _RetryingChapterContentCopyClient extends CopyClient {
+  _RetryingChapterContentCopyClient(this.failureCode);
+  final int failureCode;
   int chapterContentCalls = 0;
   int domainRefreshCalls = 0;
 
@@ -420,7 +432,7 @@ final class _RetryingChapterContentCopyClient extends CopyClient {
   }) async {
     chapterContentCalls++;
     if (chapterContentCalls < 3) {
-      throw const CopyApiException('身份认证信息未提供。', code: 401);
+      throw CopyApiException('测试响应', code: failureCode);
     }
     return const ChapterContent(
       urls: <String>['https://img.example/recovered.jpg'],

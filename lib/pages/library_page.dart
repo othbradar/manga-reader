@@ -8,6 +8,7 @@ import '../controllers/library_controller.dart';
 import '../models/comic.dart';
 import '../models/library_view.dart';
 import '../widgets/comic_grid.dart';
+import '../widgets/library_view_options.dart';
 import 'comic_detail_page.dart';
 import 'copy_manga_batch_update_page.dart';
 import 'downloads_page.dart';
@@ -171,59 +172,18 @@ class _LibraryPageState extends State<LibraryPage> {
       context: context,
       showDragHandle: true,
       builder: (sheetContext) {
-        return SafeArea(
-          child: Consumer<LibraryController>(
-            builder: (context, library, _) {
-              return Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '筛选与排序',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 20),
-                    Text('漫画来源', style: Theme.of(context).textTheme.titleSmall),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: ComicSourceFilter.values
-                          .map(
-                            (value) => ChoiceChip(
-                              label: Text(value.label),
-                              selected: library.sourceFilter == value,
-                              onSelected: (_) async {
-                                await library.setSourceFilter(value);
-                                _resetScroll();
-                              },
-                            ),
-                          )
-                          .toList(growable: false),
-                    ),
-                    const SizedBox(height: 20),
-                    Text('排序', style: Theme.of(context).textTheme.titleSmall),
-                    const SizedBox(height: 10),
-                    SegmentedButton<ComicSortMode>(
-                      segments: ComicSortMode.values
-                          .map(
-                            (value) => ButtonSegment<ComicSortMode>(
-                              value: value,
-                              label: Text(value.label),
-                            ),
-                          )
-                          .toList(growable: false),
-                      selected: {library.sortMode},
-                      onSelectionChanged: (selection) async {
-                        await library.setSortMode(selection.single);
-                        _resetScroll();
-                      },
-                    ),
-                  ],
-                ),
-              );
+        return Consumer<LibraryController>(
+          builder: (context, library, _) => LibraryViewOptions(
+            sourceLabel: '漫画来源',
+            sourceFilter: library.sourceFilter,
+            sortMode: library.sortMode,
+            onSourceChanged: (value) async {
+              await library.setSourceFilter(value);
+              _resetScroll();
+            },
+            onSortChanged: (value) async {
+              await library.setSortMode(value);
+              _resetScroll();
             },
           ),
         );

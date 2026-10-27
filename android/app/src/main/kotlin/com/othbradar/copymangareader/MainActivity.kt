@@ -35,15 +35,12 @@ class MainActivity : FlutterActivity() {
                     result.notImplemented()
                     return@setMethodCallHandler
                 }
-                val androidId = Settings.Secure.getString(
-                    contentResolver,
-                    Settings.Secure.ANDROID_ID,
-                ).orEmpty()
                 result.success(
                     mapOf(
                         "device" to Build.MODEL,
-                        "deviceInfo" to "AndroidOS",
-                        "platformId" to androidId,
+                        "deviceInfo" to "${Build.MODEL}-${Build.DEVICE}",
+                        // Official device_info_plus id, not Settings.Secure.ANDROID_ID.
+                        "platformId" to Build.ID,
                     ),
                 )
             }

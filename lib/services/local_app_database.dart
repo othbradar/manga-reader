@@ -19,6 +19,7 @@ class PortableAppDataTransferResult {
     required this.favorites,
     required this.downloadTasks,
     required this.searchEntries,
+    this.novelRows = 0,
   });
 
   final int recentViews;
@@ -28,6 +29,7 @@ class PortableAppDataTransferResult {
   final int favorites;
   final int downloadTasks;
   final int searchEntries;
+  final int novelRows;
 
   int get totalRows =>
       recentViews +
@@ -36,7 +38,8 @@ class PortableAppDataTransferResult {
       comicDetails +
       favorites +
       downloadTasks +
-      searchEntries;
+      searchEntries +
+      novelRows;
 }
 
 class LocalAppDatabase {
@@ -62,6 +65,11 @@ class LocalAppDatabase {
     'favorites_cache',
     'download_tasks',
     'search_index',
+  ];
+  static const _novelTables = [
+    'novel_progress',
+    'novel_tasks',
+    'novel_favorites',
   ];
 
   final DatabaseFactory _factory;
@@ -101,6 +109,27 @@ class LocalAppDatabase {
   }
 
   Future<void> _createSchema(DatabaseExecutor db) async {
+    // Installation identity is deliberately excluded from portable backups.
+    // Never migrate it with a library or another device's app preferences.
+    await db.execute('''CREATE TABLE IF NOT EXISTS device_identity(
+      identity_key TEXT PRIMARY KEY, identity_value TEXT NOT NULL)''');
+    await db.execute(
+      '''CREATE TABLE IF NOT EXISTS novel_progress(
+      library_key TEXT NOT NULL, novel_uuid TEXT NOT NULL, volume_id TEXT NOT NULL,
+      block_index INTEGER NOT NULL DEFAULT 0, fraction REAL NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(library_key,novel_uuid,volume_id))''',
+    );
+    await db.execute('''CREATE TABLE IF NOT EXISTS novel_tasks(
+      library_key TEXT NOT NULL, novel_uuid TEXT NOT NULL, volume_id TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'queued', progress REAL NOT NULL DEFAULT 0,
+      error_message TEXT NOT NULL DEFAULT '', queued_at TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY(library_key,novel_uuid,volume_id))''');
+    await db.execute('''CREATE TABLE IF NOT EXISTS novel_favorites(
+      library_key TEXT NOT NULL, account_key TEXT NOT NULL, novel_uuid TEXT NOT NULL,
+      path_word TEXT NOT NULL, title TEXT NOT NULL, authors TEXT NOT NULL DEFAULT '',
+      alias TEXT NOT NULL DEFAULT '', brief TEXT NOT NULL DEFAULT '', cover_url TEXT NOT NULL DEFAULT '',
+      position INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(library_key,account_key,novel_uuid))''');
     await db.execute('''
       CREATE TABLE IF NOT EXISTS recent_views(
         comic_uuid TEXT PRIMARY KEY,
@@ -513,7 +542,7 @@ class LocalAppDatabase {
           table: await _exportableGlobalRows(table),
       };
       final libraryRows = <String, List<Map<String, Object?>>>{
-        for (final table in _libraryTables)
+        for (final table in [..._libraryTables, ..._novelTables])
           table: await database.query(
             table,
             where: 'library_key = ?',
@@ -522,7 +551,11 @@ class LocalAppDatabase {
       };
 
       await backup.transaction((transaction) async {
-        for (final table in [..._globalTables, ..._libraryTables]) {
+        for (final table in [
+          ..._globalTables,
+          ..._libraryTables,
+          ..._novelTables,
+        ]) {
           await transaction.delete(table);
         }
         await transaction.delete('portable_backup_metadata');
@@ -609,12 +642,14 @@ class LocalAppDatabase {
         for (final table in _globalTables) table: await backup.query(table),
       };
       final libraryRows = <String, List<Map<String, Object?>>>{
-        for (final table in _libraryTables)
-          table: await backup.query(
-            table,
-            where: 'library_key = ?',
-            whereArgs: [_portableLibraryKey],
-          ),
+        for (final table in [..._libraryTables, ..._novelTables])
+          table: !tables.contains(table)
+              ? []
+              : await backup.query(
+                  table,
+                  where: 'library_key = ?',
+                  whereArgs: [_portableLibraryKey],
+                ),
       };
 
       await database.transaction((transaction) async {
@@ -633,7 +668,7 @@ class LocalAppDatabase {
               ...sourceRow,
               'library_key': libraryKey,
             };
-            if (entry.key == 'download_tasks') {
+            if (entry.key == 'download_tasks' || entry.key == 'novel_tasks') {
               final state = row['state']?.toString();
               if (state == DownloadState.queued.name ||
                   state == DownloadState.downloading.name) {
@@ -675,6 +710,10 @@ class LocalAppDatabase {
       favorites: libraryRows['favorites_cache']?.length ?? 0,
       downloadTasks: libraryRows['download_tasks']?.length ?? 0,
       searchEntries: libraryRows['search_index']?.length ?? 0,
+      novelRows: _novelTables.fold(
+        0,
+        (sum, table) => sum + (libraryRows[table]?.length ?? 0),
+      ),
     );
   }
 

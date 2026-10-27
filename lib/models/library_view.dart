@@ -12,11 +12,13 @@ extension ComicSourceFilterLabel on ComicSourceFilter {
     ComicSourceFilter.both => '两边都有',
   };
 
-  bool accepts(Comic comic) => switch (this) {
+  bool accepts(Comic comic) => acceptsSource(comic.source);
+
+  bool acceptsSource(ComicSource source) => switch (this) {
     ComicSourceFilter.all => true,
-    ComicSourceFilter.dmzj => comic.source == ComicSource.dmzj,
-    ComicSourceFilter.copyManga => comic.source == ComicSource.copyManga,
-    ComicSourceFilter.both => comic.source == ComicSource.both,
+    ComicSourceFilter.dmzj => source == ComicSource.dmzj,
+    ComicSourceFilter.copyManga => source == ComicSource.copyManga,
+    ComicSourceFilter.both => source == ComicSource.both,
   };
 }
 

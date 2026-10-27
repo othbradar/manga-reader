@@ -1,3 +1,4 @@
+import 'fixtures/copy_request_identity.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -6,48 +7,51 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:copymanga_reader/models/comic.dart';
 import 'package:copymanga_reader/services/copy_api_protocol.dart';
+import 'package:copymanga_reader/services/copy_request_protocol.dart';
 import 'package:copymanga_reader/services/copy_client.dart';
 
 void main() {
   group('CopyApiProtocol', () {
-    test('creates deterministic official 3.0.9 protocol headers', () {
+    test('uses one recovered APK profile for all normal API requests', () {
       final headers = CopyApiProtocol.headers(
+        identity: fixtureDeviceIdentity,
         token: 'member-token',
         now: DateTime.utc(2026, 7, 29, 12, 34, 56),
       );
 
-      expect(headers['version'], '3.0.0');
+      expect(headers['version'], '3.0.9');
       expect(headers['versionCode'], '83');
       expect(headers['platform'], '3');
-      expect(headers['source'], '#utm_source=FlutterTest');
-      expect(headers['webp'], '0');
+      expect(headers['source'], 'copyApp');
+      expect(headers['webp'], '1');
       expect(headers['region'], CopyApiRoute.overseas.region);
       expect(headers['authorization'], 'Token member-token');
       expect(headers['X-Auth-Timestamp'], '1785328496');
       expect(
         headers['X-Auth-Signature'],
-        '5e5bd47a084b436b4dc3136ce91cb56765fd3125f70866676e81c376ab3dd5fa',
+        '48f772e76c034d8281f1cab1bc52f5d25597ad1c6ed44642780b5d7e94954471',
       );
-      expect(
-        headers['umString'],
-        '7193c16dfcf6fe187e46489c5ffc55c5efbb81dec8356c41efffac90fd9d9797',
-      );
+      expect(headers['umString'], 'b4c89ca4104ea9a97750314d791520ac');
     });
 
-    test('uses the timestamp as both HMAC key and message', () {
+    test('anonymous signature matches certificate-derived OpenSSL vector', () {
       expect(
         CopyApiProtocol.authSignature('1785328496'),
-        '5e5bd47a084b436b4dc3136ce91cb56765fd3125f70866676e81c376ab3dd5fa',
+        '48f772e76c034d8281f1cab1bc52f5d25597ad1c6ed44642780b5d7e94954471',
       );
     });
 
-    test('omits authorization completely for anonymous requests', () {
-      final headers = CopyApiProtocol.headers(
-        now: DateTime.utc(2026, 7, 29, 12, 34, 56),
-      );
+    test(
+      'anonymous profile has only empty authorization, never an account token',
+      () {
+        final headers = CopyApiProtocol.headers(
+          identity: fixtureDeviceIdentity,
+          now: DateTime.utc(2026, 7, 29, 12, 34, 56),
+        );
 
-      expect(headers, isNot(contains('authorization')));
-    });
+        expect(headers['authorization'], 'Token ');
+      },
+    );
 
     test('encodes login password with the original per-request salt', () {
       expect(
@@ -55,29 +59,28 @@ void main() {
         <String, dynamic>{
           'username': 'member',
           'password': base64Encode(utf8.encode('secret-4321')),
-          'salt': 4321,
+          'salt': '4321',
         },
       );
     });
 
-    test('uses the current minimal login protocol without a member token', () {
-      expect(CopyApiProtocol.loginBody('member', 'secret'), <String, dynamic>{
-        'username': 'member',
-        'password': base64Encode(utf8.encode('secret-1729')),
-        'salt': 1729,
-      });
-      expect(CopyApiProtocol.loginHeaders(), <String, String>{
-        'User-Agent': 'COPY/3.0.0',
-        'Accept': 'application/json',
-        'version': '2025.08.15',
-        'platform': '1',
-        'webp': '1',
-        'region': '1',
-      });
-      expect(CopyApiProtocol.loginHeaders(), isNot(contains('authorization')));
+    test('login generates string salts in the original range', () {
+      final salts = <String>{};
+      for (var i = 0; i < 32; i++) {
+        final body = CopyApiProtocol.loginBody('member', 'secret');
+        final salt = body['salt'] as String;
+        salts.add(salt);
+        expect(int.parse(salt), inInclusiveRange(0, 9998));
+        expect(body['password'], base64Encode(utf8.encode('secret-$salt')));
+      }
+      expect(salts.length, greaterThan(1));
       expect(
-        CopyApiProtocol.loginHeaders(),
-        isNot(contains('X-Auth-Signature')),
+        () => CopyApiProtocol.loginBody('m', 'p', salt: 9999),
+        throwsRangeError,
+      );
+      expect(
+        () => CopyApiProtocol.loginBody('m', 'p', salt: -1),
+        throwsRangeError,
       );
     });
 
@@ -94,7 +97,10 @@ void main() {
         expect(client.apiRoute, CopyApiRoute.mainland);
         expect(client.apiDomain, CopyApiRoute.mainland.primaryDomain);
         expect(
-          CopyApiProtocol.headers(region: client.apiRoute.region)['region'],
+          CopyApiProtocol.headers(
+            identity: fixtureDeviceIdentity,
+            region: client.apiRoute.region,
+          )['region'],
           '0',
         );
       },
@@ -131,7 +137,8 @@ void main() {
   test('empty chapter lists fail over to a healthy node', () async {
     final adapter = _CopyApiAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
-    final client = CopyClient(dio: dio);
+    final client = (CopyClient(dio: dio)
+      ..setDeviceIdentity(fixtureDeviceIdentity));
 
     final chapters = await client.groupChapters(
       comic: const Comic(
@@ -151,7 +158,9 @@ void main() {
   test('mainland route discovers the current original API node', () async {
     final adapter = _CopyApiAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
-    final client = CopyClient(dio: dio)..setApiRoute(CopyApiRoute.mainland);
+    final client =
+        (CopyClient(dio: dio)..setDeviceIdentity(fixtureDeviceIdentity))
+          ..setApiRoute(CopyApiRoute.mainland);
 
     final results = await client.search('Demo');
 
@@ -167,11 +176,12 @@ void main() {
     () async {
       final adapter = _CopyApiAdapter(failOverseasDetails: true);
       final dio = Dio()..httpClientAdapter = adapter;
-      final client = CopyClient(dio: dio)
-        ..setApiRoute(CopyApiRoute.automatic)
-        // 固定首个候选以验证跨区节点参数，避免并行测试
-        // 负载让毫秒级模拟测速偶发颠倒。自动选最低延迟由独立用例验证。
-        ..setApiDomain('node-a.example');
+      final client =
+          (CopyClient(dio: dio)..setDeviceIdentity(fixtureDeviceIdentity))
+            ..setApiRoute(CopyApiRoute.automatic)
+            // 固定首个候选以验证跨区节点参数，避免并行测试
+            // 负载让毫秒级模拟测速偶发颠倒。自动选最低延迟由独立用例验证。
+            ..setApiDomain('node-a.example');
 
       final details = await client.comicDetails('demo');
 
@@ -182,7 +192,7 @@ void main() {
         'api.copy202601.com',
       ]);
       expect(adapter.detailInMainlandValues, <Object?>[false, true]);
-      expect(adapter.detailRegions, <String?>['-0800', '0']);
+      expect(adapter.detailRegions, <String?>['1', '0']);
     },
   );
 
@@ -191,7 +201,8 @@ void main() {
     () async {
       final adapter = _CopyApiAdapter(nodeBIsFastest: true);
       final dio = Dio()..httpClientAdapter = adapter;
-      final client = CopyClient(dio: dio);
+      final client = (CopyClient(dio: dio)
+        ..setDeviceIdentity(fixtureDeviceIdentity));
 
       final nodes = await client.refreshApiDomains();
 
@@ -219,7 +230,8 @@ void main() {
     () async {
       final adapter = _CopyApiAdapter();
       final dio = Dio()..httpClientAdapter = adapter;
-      final client = CopyClient(dio: dio);
+      final client = (CopyClient(dio: dio)
+        ..setDeviceIdentity(fixtureDeviceIdentity));
 
       final nodes = await client.refreshAuthenticationDomains();
 
@@ -240,51 +252,41 @@ void main() {
       client.useFastestAuthenticationDomain();
       expect(client.authenticationUrl, 'https://api.copy202601.com');
       expect(client.usesAutomaticAuthenticationDomain, isTrue);
-      expect(
-        adapter.authorizationFor(CopyApiProtocol.searchPath),
-        everyElement(isNull),
+      final probeHeaders = adapter.authorizationFor(
+        CopyApiProtocol.networkPath,
       );
+      expect(probeHeaders, isNotEmpty);
+      expect(probeHeaders, everyElement('Token '));
+      expect(adapter.authorizationFor(CopyApiProtocol.searchPath), isEmpty);
     },
   );
 
   test(
-    'anonymous content falls back through current and compatibility APIs',
+    'saved ZIP and online reading share anonymous images even while signed in',
     () async {
-      final adapter = _CopyApiAdapter();
-      final dio = Dio()..httpClientAdapter = adapter;
-      final client = CopyClient(dio: dio);
-
+      final adapter = _CopyApiAdapter(serveCurrentChapter: true);
+      final client = CopyClient(dio: Dio()..httpClientAdapter = adapter)
+        ..setDeviceIdentity(fixtureDeviceIdentity)
+        ..setToken('fixture-member-token');
       final content = await client.chapterContent(
         comicPathWord: 'demo',
         chapterUuid: 'chapter-1',
       );
-
-      expect(content.urls, <String>[
-        'https://img.example/1.jpg',
-        'https://img.example/2.jpg',
-      ]);
-      expect(content.pageCount, 2);
-      expect(client.apiDomain, 'node-b.example');
-      expect(adapter.chapterRequests, contains('node-a.example/chapter'));
-      expect(adapter.chapterRequests, contains('node-b.example/chapter'));
+      expect(content.pageCount, 1);
+      expect(adapter.chapterRequests, ['node-a.example/chapter2']);
+      expect(adapter.authorizations, everyElement('Token '));
       expect(
-        adapter.chapterRequests,
-        contains('node-a.example/chapter2download'),
+        adapter.requests.any((r) => r.path.contains('chapter2download')),
+        isFalse,
       );
-      expect(
-        adapter.chapterRequests,
-        contains('node-b.example/chapter2download'),
-      );
-      expect(adapter.inMainlandValues, everyElement(false));
-      expect(adapter.platformValues, everyElement(CopyApiProtocol.platform));
-      expect(adapter.authorizations, everyElement(isNull));
     },
   );
 
   test('current chapter API returns images without a member token', () async {
     final adapter = _CopyApiAdapter(serveCurrentChapter: true);
     final dio = Dio()..httpClientAdapter = adapter;
-    final client = CopyClient(dio: dio);
+    final client = (CopyClient(dio: dio)
+      ..setDeviceIdentity(fixtureDeviceIdentity));
 
     final content = await client.chapterContent(
       comicPathWord: 'demo',
@@ -292,9 +294,9 @@ void main() {
     );
 
     expect(content.urls, <String>['https://img.example/current.jpg']);
-    expect(adapter.chapterRequests, <String>['node-a.example/chapter']);
-    expect(adapter.platformValues, <Object?>[CopyApiProtocol.platform]);
-    expect(adapter.authorizations, everyElement(isNull));
+    expect(adapter.chapterRequests, <String>['node-a.example/chapter2']);
+    expect(adapter.platformValues, <Object?>[3]);
+    expect(adapter.authorizations, everyElement('Token '));
   });
 
   test(
@@ -302,7 +304,8 @@ void main() {
     () async {
       final adapter = _CopyApiAdapter(anonymousAuthFailureOnNodeA: true);
       final dio = Dio()..httpClientAdapter = adapter;
-      final client = CopyClient(dio: dio);
+      final client = (CopyClient(dio: dio)
+        ..setDeviceIdentity(fixtureDeviceIdentity));
 
       final content = await client.chapterContent(
         comicPathWord: 'demo',
@@ -313,16 +316,18 @@ void main() {
         'https://img.example/1.jpg',
         'https://img.example/2.jpg',
       ]);
-      expect(adapter.chapterRequests, contains('node-a.example/chapter'));
-      expect(adapter.chapterRequests, contains('node-b.example/chapter'));
-      expect(adapter.authorizations, everyElement(isNull));
+      expect(adapter.chapterRequests, contains('node-a.example/chapter2'));
+      expect(adapter.chapterRequests, contains('node-b.example/chapter2'));
+      expect(adapter.authorizations, everyElement('Token '));
     },
   );
 
   test('only member endpoints carry the stored login token', () async {
     final adapter = _CopyApiAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
-    final client = CopyClient(dio: dio)..setToken('member-token');
+    final client = (CopyClient(
+      dio: dio,
+    )..setDeviceIdentity(fixtureDeviceIdentity))..setToken('member-token');
 
     await client.search('Demo');
     await client.profile();
@@ -330,7 +335,7 @@ void main() {
 
     expect(
       adapter.authorizationFor(CopyApiProtocol.searchPath),
-      everyElement(isNull),
+      everyElement('Token '),
     );
     expect(
       adapter.authorizationFor(CopyApiProtocol.profilePath),
@@ -347,14 +352,15 @@ void main() {
     expect(imageHeaderNames, isNot(contains('region')));
     expect(
       adapter.authorizationFor(CopyApiProtocol.networkPath),
-      everyElement(isNull),
+      everyElement('Token '),
     );
   });
 
   test('search path_word resolves to the matching real comic UUID', () async {
     final adapter = _CopyApiAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
-    final client = CopyClient(dio: dio);
+    final client = (CopyClient(dio: dio)
+      ..setDeviceIdentity(fixtureDeviceIdentity));
 
     final searchResult = (await client.search('异世界叔叔')).single;
     expect(searchResult.uuid, isEmpty);
@@ -372,7 +378,9 @@ void main() {
     () async {
       final adapter = _CopyApiAdapter();
       final dio = Dio()..httpClientAdapter = adapter;
-      final client = CopyClient(dio: dio)..setToken('old-member-token');
+      final client =
+          (CopyClient(dio: dio)..setDeviceIdentity(fixtureDeviceIdentity))
+            ..setToken('old-member-token');
 
       await expectLater(
         client.login('invalid-user', 'invalid-password'),
@@ -384,43 +392,58 @@ void main() {
       );
       expect(
         adapter.authorizationFor(CopyApiProtocol.loginPath),
-        everyElement(isNull),
+        everyElement('Token '),
       );
       expect(adapter.loginHosts, <String>['api.copy202601.com']);
       final request = adapter.loginRequest!;
       expect(request.uri.host, 'api.copy202601.com');
       expect(request.contentType, Headers.formUrlEncodedContentType);
-      expect(request.headers['version'], CopyApiProtocol.loginVersion);
-      expect(request.headers['platform'], CopyApiProtocol.loginPlatform);
-      expect(request.headers['region'], CopyApiProtocol.loginRegion);
-      expect(request.headers['webp'], CopyApiProtocol.loginWebp);
-      expect(request.headers, isNot(contains('source')));
-      expect(request.headers, isNot(contains('X-Auth-Signature')));
-      expect((request.data as Map).keys, <String>[
-        'username',
-        'password',
-        'salt',
-      ]);
+      expect(request.headers['version'], '3.0.9');
+      expect(request.headers['platform'], '3');
+      expect(request.headers['region'], '0');
+      expect(request.headers['webp'], '1');
+      expect(request.headers['source'], 'copyApp');
+      expect(request.queryParameters['platform'], 3);
+      expect(
+        request.headers['X-Auth-Signature'],
+        CopyRequestProtocol.signature(
+          request.headers['X-Auth-Timestamp'],
+          nativeMaterial: CopyRequestProtocol.certificateMd5,
+        ),
+      );
+      expect(
+        (request.data as Map).keys,
+        containsAll(<String>[
+          'username',
+          'password',
+          'salt',
+          'tapString',
+          'umString',
+          'authorization',
+          'version',
+          'source',
+        ]),
+      );
     },
   );
 
   test(
-    'login falls back only when the primary transport is unavailable',
+    'login never replays credentials after an ambiguous network failure',
     () async {
       final adapter = _CopyApiAdapter(
         loginSucceeds: true,
         failPrimaryLoginTransport: true,
       );
       final dio = Dio()..httpClientAdapter = adapter;
-      final client = CopyClient(dio: dio);
+      final client = (CopyClient(dio: dio)
+        ..setDeviceIdentity(fixtureDeviceIdentity));
 
-      final result = await client.login('member', 'secret');
-
-      expect(result['token'], 'verified-member-token');
-      expect(adapter.loginHosts, <String>[
-        'api.copy202601.com',
-        'api.copy202602.com',
-      ]);
+      await expectLater(
+        client.login('member', 'secret'),
+        throwsA(isA<CopyApiException>()),
+      );
+      expect(adapter.loginHosts, <String>['api.copy202601.com']);
+      expect(client.hasToken, isFalse);
     },
   );
 
@@ -429,7 +452,8 @@ void main() {
     () async {
       final adapter = _CopyApiAdapter(loginSucceeds: true);
       final dio = Dio()..httpClientAdapter = adapter;
-      final client = CopyClient(dio: dio);
+      final client = (CopyClient(dio: dio)
+        ..setDeviceIdentity(fixtureDeviceIdentity));
 
       final result = await client.login('member', 'secret');
 
@@ -512,6 +536,22 @@ final class _CopyApiAdapter implements HttpClientAdapter {
     }
 
     if (uri.path == CopyApiProtocol.networkPath) {
+      final fast =
+          uri.host.startsWith('api.copy') || uri.host == 'mapi.mangacopy.com'
+          ? 'api.copy202601.com'
+          : nodeBIsFastest
+          ? 'node-b.example'
+          : 'node-a.example';
+      await Future<void>.delayed(
+        Duration(
+          milliseconds: uri.host == fast
+              ? 2
+              : uri.host == 'mapi.mangacopy.com'
+              ? 45
+              : 25,
+        ),
+      );
+
       if (uri.host == CopyApiRoute.mainland.primaryDomain) {
         return _json(<String, dynamic>{
           'code': 200,
@@ -566,29 +606,6 @@ final class _CopyApiAdapter implements HttpClientAdapter {
         });
       }
       return _maintenance();
-    }
-
-    if (uri.path == CopyApiProtocol.searchPath &&
-        options.queryParameters['q'] == CopyApiProtocol.nodeProbeQuery['q']) {
-      final fast =
-          uri.host.startsWith('api.copy') || uri.host == 'mapi.mangacopy.com'
-          ? 'api.copy202601.com'
-          : nodeBIsFastest
-          ? 'node-b.example'
-          : 'node-a.example';
-      await Future<void>.delayed(
-        Duration(
-          milliseconds: uri.host == fast
-              ? 2
-              : uri.host == 'mapi.mangacopy.com'
-              ? 45
-              : 25,
-        ),
-      );
-      return _json(<String, dynamic>{
-        'code': 200,
-        'results': <String, dynamic>{'list': <Object>[], 'total': 0},
-      });
     }
 
     if (uri.path == CopyApiProtocol.searchPath) {
@@ -694,88 +711,31 @@ final class _CopyApiAdapter implements HttpClientAdapter {
       );
     }
 
-    if (uri.path.contains('/chapter/')) {
-      chapterRequests.add('${uri.host}/chapter');
-      inMainlandValues.add(options.queryParameters['in_mainland']);
-      platformValues.add(options.queryParameters['platform']);
-      if (anonymousAuthFailureOnNodeA && uri.host == 'node-a.example') {
-        return _json(<String, dynamic>{
-          'code': 401,
-          'message': '身份认证信息未提供。',
-        }, status: 401);
-      }
-      if (serveCurrentChapter) {
-        return _json(<String, dynamic>{
-          'code': 200,
-          'results': <String, dynamic>{
-            'chapter': <String, dynamic>{
-              'size': 1,
-              'contents': <Object>[
-                <String, dynamic>{'url': 'https://img.example/current.jpg'},
-              ],
-            },
-          },
-        });
-      }
-      return _json(<String, dynamic>{
-        'code': 200,
-        'results': <String, dynamic>{
-          'chapter': <String, dynamic>{'size': 0, 'contents': <Object>[]},
-        },
-      });
-    }
-
     if (uri.path.contains('/chapter2/')) {
       chapterRequests.add('${uri.host}/chapter2');
       inMainlandValues.add(options.queryParameters['in_mainland']);
       platformValues.add(options.queryParameters['platform']);
       if (anonymousAuthFailureOnNodeA && uri.host == 'node-a.example') {
-        return _json(<String, dynamic>{
-          'code': 401,
-          'message': '身份认证信息未提供。',
-        }, status: 401);
+        return _json({'code': 401, 'message': '身份认证信息未提供。'}, status: 401);
       }
-      return _json(<String, dynamic>{
+      return _json({
         'code': 200,
-        'results': <String, dynamic>{
-          'chapter': <String, dynamic>{'size': 0, 'contents': <Object>[]},
+        'results': {
+          'chapter': {
+            'size': serveCurrentChapter ? 1 : 2,
+            'contents': serveCurrentChapter
+                ? [
+                    {'url': 'https://img.example/current.jpg'},
+                  ]
+                : uri.host == 'node-b.example'
+                ? [
+                    {'url': 'https://img.example/1.jpg'},
+                    'https://img.example/2.jpg',
+                  ]
+                : [],
+          },
         },
       });
-    }
-
-    if (uri.path.contains('/chapter2download/')) {
-      chapterRequests.add('${uri.host}/chapter2download');
-      inMainlandValues.add(options.queryParameters['in_mainland']);
-      platformValues.add(options.queryParameters['platform']);
-      if (anonymousAuthFailureOnNodeA && uri.host == 'node-a.example') {
-        return _json(<String, dynamic>{
-          'code': 401,
-          'message': '身份认证信息未提供。',
-        }, status: 401);
-      }
-      if (uri.host == 'node-a.example') {
-        return _json(<String, dynamic>{
-          'code': 200,
-          'results': <String, dynamic>{
-            'chapter': <String, dynamic>{'size': 0, 'contents': <Object>[]},
-          },
-        });
-      }
-      if (uri.host == 'node-b.example') {
-        return _json(<String, dynamic>{
-          'code': 200,
-          'results': <String, dynamic>{
-            'chapter': <String, dynamic>{
-              'size': 2,
-              'contents': <Object>[
-                <String, dynamic>{'url': 'https://img.example/1.jpg'},
-                'https://img.example/2.jpg',
-              ],
-            },
-          },
-        });
-      }
-      return _maintenance();
     }
 
     return _maintenance();

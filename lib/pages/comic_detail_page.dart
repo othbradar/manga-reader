@@ -4,10 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../controllers/library_controller.dart';
+import '../controllers/favorites_controller.dart';
+import '../controllers/session_controller.dart';
 import '../models/chapter.dart';
 import '../models/comic.dart';
 import '../services/copy_client.dart';
 import '../widgets/comic_cover.dart';
+import '../widgets/favorite_button.dart';
+import 'login_page.dart';
 import 'chapter_download_page.dart';
 import 'reader_page.dart';
 
@@ -144,6 +148,8 @@ class _ComicDetailPageState extends State<ComicDetailPage> {
   @override
   Widget build(BuildContext context) {
     final library = context.watch<LibraryController>();
+    final session = context.watch<SessionController>();
+    final favorites = context.read<FavoritesController>();
     final grouped = <String, List<Chapter>>{};
     for (final chapter in _chapters) {
       grouped.putIfAbsent(chapter.groupName, () => []).add(chapter);
@@ -173,6 +179,29 @@ class _ComicDetailPageState extends State<ComicDetailPage> {
                         comic: _comic,
                         coverPath: library.coverPath(_comic),
                         updating: _updating,
+                        favoriteButton: FavoriteButton(
+                          scope: (
+                            session.client.sessionRevision,
+                            session.username,
+                            library.database.libraryKey,
+                            _comic.uuid,
+                          ),
+                          loggedIn: session.isLoggedIn,
+                          available:
+                              _comic.uuid.isNotEmpty &&
+                              _comic.pathWord.isNotEmpty &&
+                              !_comic.pathWord.startsWith('local-'),
+                          loadSelected: () => favorites.isCollected(_comic),
+                          setSelected: (value) =>
+                              favorites.setFavorite(_comic, value),
+                          onLogin: () async {
+                            await Navigator.of(context).push<bool>(
+                              MaterialPageRoute(
+                                builder: (_) => const LoginPage(),
+                              ),
+                            );
+                          },
+                        ),
                       ),
                     ),
                   ),
@@ -254,11 +283,13 @@ class _Header extends StatelessWidget {
     required this.comic,
     required this.coverPath,
     required this.updating,
+    required this.favoriteButton,
   });
 
   final Comic comic;
   final String coverPath;
   final bool updating;
+  final Widget favoriteButton;
 
   @override
   Widget build(BuildContext context) {
@@ -297,6 +328,7 @@ class _Header extends StatelessWidget {
               '${comic.totalChapters} 章',
               style: TextStyle(color: Theme.of(context).colorScheme.primary),
             ),
+            favoriteButton,
             if (comic.brief.isNotEmpty) ...[
               const SizedBox(height: 14),
               Text(comic.brief),

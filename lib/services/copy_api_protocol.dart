@@ -1,33 +1,15 @@
 import 'dart:convert';
+import 'dart:math';
 
-import 'package:crypto/crypto.dart';
-
-class CopyDeviceIdentity {
-  const CopyDeviceIdentity({
-    required this.device,
-    required this.deviceInfo,
-    required this.androidId,
-    required this.pseudoId,
-  });
-
-  static const fallback = CopyDeviceIdentity(
-    device: 'Flutter',
-    deviceInfo: 'AndroidOS',
-    androidId: '0000000000000000',
-    pseudoId: '0000000000000000',
-  );
-
-  final String device;
-  final String deviceInfo;
-  final String androidId;
-  final String pseudoId;
-}
+import 'copy_device_identity_model.dart';
+import 'copy_request_protocol.dart';
+export 'copy_device_identity_model.dart';
 
 enum CopyApiRoute {
   overseas(
     settingValue: 'overseas',
     label: '海外线路',
-    region: '-0800',
+    region: '1',
     inMainland: false,
     primaryDomain: 'api.manga2026.xyz',
   ),
@@ -41,7 +23,7 @@ enum CopyApiRoute {
   automatic(
     settingValue: 'automatic',
     label: '自动选择',
-    region: '-0800',
+    region: '1',
     inMainland: null,
     primaryDomain: 'api.manga2026.xyz',
   );
@@ -76,17 +58,12 @@ final class CopyApiProtocol {
   CopyApiProtocol._();
 
   static const String appVersion = '3.0.9';
-  static const String apiVersion = '3.0.0';
+  static const String apiVersion = CopyRequestProtocol.version;
   static const String versionCode = '83';
   static const String platform = '3';
-  static const String source = '#utm_source=FlutterTest';
-  static const String webp = '0';
-  static const int loginSalt = 1729;
-  static const String loginUserAgent = 'COPY/3.0.0';
-  static const String loginVersion = '2025.08.15';
-  static const String loginPlatform = '1';
-  static const String loginWebp = '1';
-  static const String loginRegion = '1';
+  static const String source = CopyRequestProtocol.source;
+  static const String webp = CopyRequestProtocol.webp;
+  static final Random _loginRandom = Random.secure();
   // 3.0.9 原版内置的节点发现入口。业务请求优先使用 network2 返回的
   // 节点；账号、收藏、搜索、详情和章节共用同一套节点池。
   static const String defaultDomain = 'api.manga2026.xyz';
@@ -107,60 +84,67 @@ final class CopyApiProtocol {
     'mapi.copy-manga.com',
   };
 
-  // 原版 3.0.9 Android 客户端内置的 Umeng app key。它只用于统计相关
-  // 请求头，不能作为 API 请求签名密钥。
-  static const String _umengAppKey = '65ddae8ba7208a5af1b1bdca';
-  static final String _umString = sha256
-      .convert(utf8.encode(_umengAppKey))
-      .toString();
-
   static const String loginPath = '/api/v3/login';
   static const String profilePath = '/api/v3/member/info';
   static const String favoritesPath = '/api/v3/member/collect/comics';
+  static const String comicCollectPath = '/api/v3/member/collect/comic';
   static const String searchPath = '/api/v3/search/comic';
   static const String networkPath = '/api/v3/system/network2';
+
+  static const String novelSearchPath = '/api/v3/search/books';
+  static const String novelFavoritesPath = '/api/v3/member/collect/books';
+  static const String novelCollectPath = '/api/v3/member/collect/book';
+
+  /// An explicit allowlist prevents accidental token use on content or CDN URLs.
+  static const memberPaths = {
+    profilePath,
+    favoritesPath,
+    comicCollectPath,
+    novelFavoritesPath,
+    novelCollectPath,
+  };
+  static bool requiresAuthentication(String path) => memberPaths.contains(path);
+  static bool isAccountWrite(String path) =>
+      path == loginPath || path == comicCollectPath || path == novelCollectPath;
+  static Map<String, dynamic> comicCollectBody(String uuid, bool collected) => {
+    'comic_id': uuid,
+    'is_collect': collected ? 1 : 0,
+  };
+  static String novelDetailsPath(String pathWord) =>
+      '/api/v3/book/${Uri.encodeComponent(pathWord)}';
+  static String novelVolumesPath(String pathWord) =>
+      '${novelDetailsPath(pathWord)}/volumes';
+  static String novelVolumePath(String pathWord, String id) =>
+      '${novelDetailsPath(pathWord)}/volume/${Uri.encodeComponent(id)}';
+  static Map<String, dynamic> novelCollectBody(String uuid, bool collected) => {
+    'book_id': uuid,
+    'is_collect': collected ? 1 : 0,
+  };
 
   static String comicDetailsPath(String pathWord) => '/api/v3/comic2/$pathWord';
 
   static String groupChaptersPath(String comicPathWord, String groupPathWord) =>
       '/api/v3/comic/$comicPathWord/group/$groupPathWord/chapters';
 
-  static String legacyChapterContentPath(
-    String comicPathWord,
-    String chapterUuid,
-  ) => '/api/v3/comic/$comicPathWord/chapter/$chapterUuid';
-
   static String chapterContentPath(String comicPathWord, String chapterUuid) =>
       '/api/v3/comic/$comicPathWord/chapter2/$chapterUuid';
-
-  static String chapterDownloadPath(String comicPathWord, String chapterUuid) =>
-      '/api/v3/comic/$comicPathWord/chapter2download/$chapterUuid';
 
   static Map<String, dynamic> loginBody(
     String username,
     String password, {
     int? salt,
   }) {
-    final requestSalt = salt ?? loginSalt;
+    // APK 3.0.9: Random.secure().nextInt(9999), then toString().
+    final requestSalt = salt ?? _loginRandom.nextInt(9999);
+    if (requestSalt < 0 || requestSalt >= 9999) {
+      throw RangeError.range(requestSalt, 0, 9998, 'salt');
+    }
     return <String, dynamic>{
       'username': username,
       'password': base64Encode(utf8.encode('$password-$requestSalt')),
-      'salt': requestSalt,
+      'salt': requestSalt.toString(),
     };
   }
-
-  /// 当前可用账号接口所要求的最小请求头。
-  ///
-  /// 登录接口与搜索、详情等匿名接口的版本协商不同。这里保持与当前
-  /// 上游客户端一致，不携带会员 token、旧版设备指纹或旧版签名头。
-  static Map<String, String> loginHeaders() => const <String, String>{
-    'User-Agent': loginUserAgent,
-    'Accept': 'application/json',
-    'version': loginVersion,
-    'platform': loginPlatform,
-    'webp': loginWebp,
-    'region': loginRegion,
-  };
 
   static Map<String, dynamic> favoritesQuery({
     required int limit,
@@ -182,20 +166,12 @@ final class CopyApiProtocol {
     'offset': offset,
     'q': keyword,
     'q_type': '',
-    'platform': platform,
-  };
-
-  static const Map<String, dynamic> nodeProbeQuery = <String, dynamic>{
-    'limit': 1,
-    'offset': 0,
-    'q': '__copy_node_probe__',
-    'q_type': '',
-    'platform': platform,
+    'platform': 3,
   };
 
   static Map<String, dynamic> comicDetailsQuery({required bool inMainland}) =>
       <String, dynamic>{
-        'platform': platform,
+        'platform': 3,
         'in_mainland': inMainland,
         'request_id': '',
       };
@@ -207,70 +183,42 @@ final class CopyApiProtocol {
 
   static Map<String, dynamic> chapterContentQuery({required bool inMainland}) =>
       <String, dynamic>{
-        'platform': platform,
+        'platform': 3,
         'in_mainland': inMainland,
         'request_id': '',
       };
 
   static const Map<String, dynamic> networkQuery = <String, dynamic>{
-    'platform': platform,
+    'platform': 3,
   };
 
+  /// One shared normal-API profile. Logged-out requests carry the APK's empty
+  /// `Token ` value; that is not a credential. CDN requests bypass this method.
   static Map<String, String> headers({
     String? token,
-    bool includeEmptyAuthorization = false,
-    String region = '-0800',
-    CopyDeviceIdentity identity = CopyDeviceIdentity.fallback,
+    String region = '1',
+    required CopyDeviceIdentity identity,
     DateTime? now,
+    DateTime? startupDate,
   }) {
     final current = now ?? DateTime.now();
-    final timestamp = (current.microsecondsSinceEpoch ~/ 1000000).toString();
-    final signature = authSignature(timestamp);
-    final date =
-        '${current.year.toString().padLeft(4, '0')}.'
-        '${current.month.toString().padLeft(2, '0')}.'
-        '${current.day.toString().padLeft(2, '0')}';
-
-    final headers = <String, String>{
-      'Accept': 'application/json',
-      'Accept-Language': 'zh-CN,zh;q=0.9',
-      'User-Agent': 'COPY/$appVersion',
-      'userAgent': 'COPY/$appVersion',
-      'source': source,
-      'platform': platform,
-      'version': apiVersion,
-      'versionCode': versionCode,
-      'referer': 'com.copymanga.app-$appVersion',
-      'region': region,
-      'webp': webp,
-      'umString': _umString,
-      'device': identity.device,
-      'deviceInfo': identity.deviceInfo,
-      'androidId': identity.androidId,
-      'pseudoID': identity.pseudoId,
-      'dt': date,
-      'X-Auth-Timestamp': timestamp,
-      'X-Auth-Signature': signature,
-    };
-    final memberToken = token?.trim() ?? '';
-    if (memberToken.isNotEmpty) {
-      headers['authorization'] = 'Token $memberToken';
-    } else if (includeEmptyAuthorization) {
-      // 原版 3.0.9 登录请求会保留这个空 Token 头。它不包含会员
-      // 凭据，但服务端会用它区分官方客户端协议与普通网页请求。
-      headers['authorization'] = 'Token ';
-    }
-    return headers;
+    return CopyRequestProtocol.headers(
+      commonParameters: CopyRequestProtocol.commonParameters(
+        identity: identity,
+        date: startupDate ?? CopyRequestProtocol.startupDate(current),
+        region: region,
+        token: token ?? '',
+      ),
+      nativeMaterial: CopyRequestProtocol.certificateMd5,
+      now: current,
+    );
   }
 
-  /// 3.0.9 原版 `_Lv` 请求拦截器的签名算法。
-  ///
-  /// 原版把秒级时间戳的 UTF-8 字节同时作为 HMAC-SHA256 的 key 和
-  /// message，再将摘要编码成小写十六进制。Umeng app key 不参与签名。
-  static String authSignature(String timestamp) {
-    final timestampBytes = utf8.encode(timestamp);
-    return Hmac(sha256, timestampBytes).convert(timestampBytes).toString();
-  }
+  static String authSignature(String timestamp) =>
+      CopyRequestProtocol.signature(
+        timestamp,
+        nativeMaterial: CopyRequestProtocol.certificateMd5,
+      );
 
   static List<String> domainsFor(CopyApiRoute route) {
     return switch (route) {

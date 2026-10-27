@@ -6,6 +6,7 @@ import '../models/comic.dart';
 import 'chinese_search_normalizer.dart';
 import 'copy_api_protocol.dart';
 import 'copy_api_transport.dart';
+import 'copy_novel_client.dart';
 
 export 'copy_api_transport.dart' show CopyApiException, CopyApiNode;
 
@@ -54,6 +55,9 @@ class CopyClient {
 
   final CopyApiTransport _transport;
   final ChineseSearchNormalizer? normalizer;
+  CopyNovelClient? _novels;
+  CopyNovelClient get novels =>
+      _novels ??= CopyNovelClient(_transport, normalizer);
 
   String get apiDomain => _transport.apiDomain;
   String get apiUrl => _transport.apiUrl;
@@ -66,6 +70,7 @@ class CopyClient {
   bool get usesAutomaticAuthenticationDomain =>
       _transport.usesAutomaticAuthenticationDomain;
   bool get hasToken => _transport.hasToken;
+  int get sessionRevision => _transport.sessionRevision;
   CopyApiRoute get apiRoute => _transport.apiRoute;
 
   void setToken(String token) => _transport.setToken(token);
@@ -134,6 +139,7 @@ class CopyClient {
     var offset = 0;
     var total = 1;
     final comics = <Comic>[];
+    final seen = <String>{};
     while (offset < total) {
       final results = _asMap(
         await _transport.requestResults(
@@ -144,19 +150,40 @@ class CopyClient {
             ordering: ordering,
           ),
           authenticated: true,
+          validateResults: (value) => _asMap(value)['list'] is List,
         ),
       );
       final list = _asList(results['list']);
+      final before = comics.length;
       for (final item in list) {
         final row = _asMap(item);
         final comicData = row['comic'] is Map ? _asMap(row['comic']) : row;
-        comics.add(Comic.fromApi(comicData, favorite: true));
+        final comic = Comic.fromApi(comicData, favorite: true);
+        if (comic.uuid.isNotEmpty && seen.add(comic.uuid)) comics.add(comic);
       }
       total = _asInt(results['total'], fallback: comics.length);
-      offset += limit;
-      if (list.isEmpty) break;
+      offset += list.length;
+      if (list.isEmpty && offset < total ||
+          list.isNotEmpty && comics.length == before) {
+        throw const CopyApiException('漫画收藏分页不完整，已保留原收藏缓存');
+      }
     }
     return comics;
+  }
+
+  Future<void> setFavorite(Comic comic, bool selected) async {
+    if (comic.uuid.isEmpty ||
+        comic.pathWord.isEmpty ||
+        comic.pathWord.startsWith('local-')) {
+      throw const CopyApiException('本地漫画没有在线收藏标识');
+    }
+    await _transport.requestResults(
+      CopyApiProtocol.comicCollectPath,
+      method: 'POST',
+      authenticated: true,
+      formEncoded: true,
+      data: CopyApiProtocol.comicCollectBody(comic.uuid, selected),
+    );
   }
 
   Future<List<Comic>> search(String keyword, {int page = 1}) async {
@@ -278,42 +305,16 @@ class CopyClient {
     required String chapterUuid,
   }) async {
     await _transport.prepare();
-    final query = CopyApiProtocol.chapterContentQuery(
-      inMainland: _transport.inMainland,
+    // Reading and saving to ZIP both consume anonymous reading images.
+    // The user explicitly prefers this to the account-only download endpoint.
+    final rawResults = await _transport.requestResults(
+      CopyApiProtocol.chapterContentPath(comicPathWord, chapterUuid),
+      query: CopyApiProtocol.chapterContentQuery(
+        inMainland: _transport.inMainland,
+      ),
+      validateResults: _hasChapterImages,
+      invalidResultsMessage: '章节没有返回可下载的图片',
     );
-    final candidates = <(String, String)>[
-      (
-        CopyApiProtocol.legacyChapterContentPath(comicPathWord, chapterUuid),
-        '当前章节节点',
-      ),
-      (
-        CopyApiProtocol.chapterContentPath(comicPathWord, chapterUuid),
-        '兼容阅读节点',
-      ),
-      (
-        CopyApiProtocol.chapterDownloadPath(comicPathWord, chapterUuid),
-        '兼容下载节点',
-      ),
-    ];
-    final failures = <String>[];
-    Object? rawResults;
-    for (final candidate in candidates) {
-      try {
-        rawResults = await _transport.requestResults(
-          candidate.$1,
-          query: query,
-          validateResults: _hasChapterImages,
-          invalidResultsMessage: '${candidate.$2}返回了空图片列表',
-        );
-        break;
-      } on CopyApiException catch (exception) {
-        if (exception.code == 401) rethrow;
-        failures.add('${candidate.$2}：${exception.message}');
-      }
-    }
-    if (rawResults == null) {
-      throw CopyApiException('章节图片接口均不可用：${failures.join('；')}');
-    }
 
     final results = _asMap(rawResults);
     final chapter = _asMap(results['chapter']);

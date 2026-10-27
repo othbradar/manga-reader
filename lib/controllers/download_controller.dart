@@ -435,6 +435,7 @@ class DownloadController extends ChangeNotifier {
     String chapterUuid,
   ) {
     if (automaticTaskRetryDelays.isEmpty ||
+        _requiresAccountAction(exception) ||
         (exception is! CopyApiException && exception is! DioException)) {
       return null;
     }
@@ -511,13 +512,14 @@ class DownloadController extends ChangeNotifier {
         rethrow;
       } catch (exception) {
         if (_pauseRequested || globalPaused) throw const _DownloadPaused();
+        if (_requiresAccountAction(exception)) rethrow;
         lastFailure = exception;
         if (attempt >= attempts) break;
         if (_shouldRefreshPageAddresses(exception, attempt)) {
           try {
             await client.refreshApiDomains();
           } catch (_) {
-            // Retry the chapter request even if node discovery itself failed.
+            // Keep retrying anonymous reading metadata if discovery fails.
           }
         }
         await _waitBeforeRetry(attempt, 0);
@@ -532,6 +534,10 @@ class DownloadController extends ChangeNotifier {
     }
     return true;
   }
+
+  bool _requiresAccountAction(Object error) =>
+      error is CopyApiException &&
+      (error.accountRestricted || const {401, 403, 429}.contains(error.code));
 
   bool _shouldRefreshPageAddresses(Object exception, int attempt) {
     if (attempt >= 2) return true;
