@@ -29,7 +29,6 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     final library = context.watch<LibraryController>();
-    final session = context.watch<SessionController>();
     final appearance = context.watch<AppearanceController>();
     return Scaffold(
       appBar: AppBar(title: const Text('设置与说明')),
@@ -223,7 +222,10 @@ class _SettingsPageState extends State<SettingsPage> {
                 leading: const Icon(Icons.verified_user_outlined),
                 title: const Text('账号存储'),
                 subtitle: Text(
-                  session.isLoggedIn ? '令牌保存在系统安全存储中' : '尚未保存登录令牌',
+                  '多账号登录令牌分别保存在系统安全存储，不保存密码。'
+                  '账号列表与收藏缓存保存在本机数据库，按账号隔离；'
+                  '切换账号不改变本地书库、下载任务和阅读记录。'
+                  '应用数据导出不包含登录凭据，其他设备需重新登录。',
                 ),
               ),
               const Divider(height: 1),
@@ -744,6 +746,9 @@ class _SettingsPageState extends State<SettingsPage> {
       'authentication_domain',
       client.authenticationDomain,
     );
+    if (context.mounted) {
+      await context.read<SessionController>().saveCurrentNode();
+    }
     if (!context.mounted) return;
     setState(() {});
     ScaffoldMessenger.of(
@@ -788,6 +793,9 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         library.database.setSetting('authentication_domain_mode', 'manual'),
       ]);
+      if (context.mounted) {
+        await context.read<SessionController>().saveCurrentNode();
+      }
       if (!context.mounted) return;
       setState(() {});
       ScaffoldMessenger.of(
@@ -813,6 +821,7 @@ class _SettingsPageState extends State<SettingsPage> {
         'authentication_domain',
         client.authenticationDomain,
       );
+      if (mounted) await context.read<SessionController>().saveCurrentNode();
       if (!mounted) return;
       setState(() {});
       final reachable = nodes.where((node) => node.reachable).length;

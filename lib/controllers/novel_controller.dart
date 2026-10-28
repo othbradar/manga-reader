@@ -37,13 +37,26 @@ class NovelController extends ChangeNotifier {
   (int, String, String)? _verifiedFavorites;
   final Map<(int, String, String), Future<void>> _favoriteReads = {};
   bool _changingFavorite = false;
+  String? _activeAccount;
+
+  void changeAccount(String account) {
+    _activeAccount = account;
+    _cancelCollect = true;
+    favorites = [];
+    collectFailures.clear();
+    collectDone = collectTotal = 0;
+    _verifiedFavorites = null;
+    _notify();
+  }
+
   (int, String, String) _favoriteScope(String account) =>
       (client.sessionRevision, store.key, account);
 
   void _checkFavoriteScope((int, String, String) scope) {
     if (_disposed ||
         scope.$1 != client.sessionRevision ||
-        scope.$2 != store.key) {
+        scope.$2 != store.key ||
+        (_activeAccount != null && scope.$3 != _activeAccount)) {
       throw const CopyApiException('账号或漫画库已切换，已停止收藏操作');
     }
   }
@@ -171,6 +184,8 @@ class NovelController extends ChangeNotifier {
 
   Future<void> loadFavorites(String account, {bool online = false}) async {
     final scope = _favoriteScope(account);
+    _checkFavoriteScope(scope);
+    if (account.isEmpty) return;
     if (online) {
       return _favoriteReads.putIfAbsent(scope, () async {
         try {

@@ -322,6 +322,7 @@ void main() {
     () async {
       adapter.hold = Completer<void>();
       final a = read();
+      final staleResponse = expectLater(a, throwsA(isA<CopyApiException>()));
       await adapter.entered.future;
       final b = write();
       final cancelled = expectLater(
@@ -336,7 +337,7 @@ void main() {
       );
       transport.setToken('different-user-token');
       adapter.hold!.complete();
-      await a;
+      await staleResponse;
       await cancelled;
       expect(adapter.calls, hasLength(1));
     },

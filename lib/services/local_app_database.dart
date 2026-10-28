@@ -70,6 +70,7 @@ class LocalAppDatabase {
     'novel_progress',
     'novel_tasks',
     'novel_favorites',
+    'account_comic_favorites',
   ];
 
   final DatabaseFactory _factory;
@@ -207,6 +208,17 @@ class LocalAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_favorites_library_position
       ON favorites_cache(library_key, position)
     ''');
+    await db.execute(
+      '''CREATE TABLE IF NOT EXISTS account_comic_favorites(
+      library_key TEXT NOT NULL, account_key TEXT NOT NULL, comic_uuid TEXT NOT NULL,
+      path_word TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '',
+      authors TEXT NOT NULL DEFAULT '', cover_url TEXT NOT NULL DEFAULT '',
+      alias TEXT NOT NULL DEFAULT '', brief TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT '', last_chapter TEXT NOT NULL DEFAULT '',
+      source_kind TEXT NOT NULL DEFAULT 'copy_manga', library_order INTEGER NOT NULL DEFAULT 0,
+      title_sort_key TEXT NOT NULL DEFAULT '', position INTEGER NOT NULL DEFAULT 0,
+      cached_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(library_key,account_key,comic_uuid))''',
+    );
     await db.execute('''
       CREATE TABLE IF NOT EXISTS download_tasks(
         library_key TEXT NOT NULL,
@@ -390,20 +402,26 @@ class LocalAppDatabase {
 
   Future<void> replaceFavorites(
     String libraryKey,
-    List<Comic> favorites,
-  ) async {
+    List<Comic> favorites, {
+    String? accountKey,
+  }) async {
+    final table = accountKey == null
+        ? 'favorites_cache'
+        : 'account_comic_favorites';
     final now = DateTime.now().toIso8601String();
     await database.transaction((transaction) async {
       await transaction.delete(
-        'favorites_cache',
-        where: 'library_key = ?',
-        whereArgs: [libraryKey],
+        table,
+        where:
+            'library_key = ?${accountKey == null ? '' : ' AND account_key = ?'}',
+        whereArgs: [libraryKey, ?accountKey],
       );
       for (var index = 0; index < favorites.length; index++) {
         final comic = favorites[index];
         if (comic.uuid.isEmpty) continue;
-        await transaction.insert('favorites_cache', {
+        await transaction.insert(table, {
           'library_key': libraryKey,
+          'account_key': ?accountKey,
           'comic_uuid': comic.uuid,
           'path_word': comic.pathWord,
           'title': comic.title,
@@ -707,13 +725,14 @@ class LocalAppDatabase {
       readProgress: globalRows['read_progress']?.length ?? 0,
       preferences: globalRows['local_preferences']?.length ?? 0,
       comicDetails: libraryRows['comic_details']?.length ?? 0,
-      favorites: libraryRows['favorites_cache']?.length ?? 0,
+      favorites:
+          (libraryRows['favorites_cache']?.length ?? 0) +
+          (libraryRows['account_comic_favorites']?.length ?? 0),
       downloadTasks: libraryRows['download_tasks']?.length ?? 0,
       searchEntries: libraryRows['search_index']?.length ?? 0,
-      novelRows: _novelTables.fold(
-        0,
-        (sum, table) => sum + (libraryRows[table]?.length ?? 0),
-      ),
+      novelRows: _novelTables
+          .where((table) => table != 'account_comic_favorites')
+          .fold(0, (sum, table) => sum + (libraryRows[table]?.length ?? 0)),
     );
   }
 

@@ -21,6 +21,7 @@ import 'services/copy_device_identity.dart';
 import 'services/library_database.dart';
 import 'services/library_locator.dart';
 import 'services/local_app_database.dart';
+import 'services/account_store.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -74,13 +75,15 @@ class _CopyMangaReaderBootstrapState extends State<CopyMangaReaderBootstrap> {
       client: _client,
       localDatabase: _localDatabase,
     );
-    _session = SessionController(_client);
+    _database.favoritesAccountKey = '';
+    _session = SessionController(_client, store: AccountStore(_localDatabase));
     _favorites = FavoritesController(database: _database, client: _client);
     _downloads = DownloadController(database: _database, client: _client);
     _novels = NovelController(
       store: NovelStore(_database),
       client: _client.novels,
     );
+    _session.addListener(_sessionChanged);
     unawaited(_initialize());
   }
 
@@ -122,8 +125,31 @@ class _CopyMangaReaderBootstrapState extends State<CopyMangaReaderBootstrap> {
     await _session.restore();
   }
 
+  (int, String)? _lastSessionScope;
+  void _sessionChanged() {
+    final scope = (_client.sessionRevision, _session.accountKey);
+    if (scope == _lastSessionScope) return;
+    _lastSessionScope = scope;
+    _favorites.changeAccount(_session.accountKey);
+    _novels.changeAccount(_session.accountKey);
+    if (_library.ready && _session.isLoggedIn) {
+      unawaited(_loadAccountCaches(scope));
+    }
+  }
+
+  Future<void> _loadAccountCaches((int, String) scope) async {
+    try {
+      await _favorites.loadCache();
+      if (_lastSessionScope != scope) return;
+      await _novels.loadFavorites(scope.$2);
+    } catch (_) {
+      // A missing/unavailable library must not prevent local account switching.
+    }
+  }
+
   @override
   void dispose() {
+    _session.removeListener(_sessionChanged);
     unawaited(_database.close());
     unawaited(_localDatabase.close());
     _downloads.dispose();

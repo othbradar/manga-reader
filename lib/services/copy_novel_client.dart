@@ -113,10 +113,14 @@ class CopyNovelClient {
     String path, {
     bool authenticated = false,
   }) async {
+    final revision = sessionRevision;
     final result = <Map<String, dynamic>>[];
     final seen = <String>{};
     var offset = 0;
     while (true) {
+      if (authenticated && revision != sessionRevision) {
+        throw const CopyApiException('账号已切换，已停止旧账号的收藏分页');
+      }
       final page = novelMap(
         await transport.requestResults(
           path,
@@ -129,6 +133,9 @@ class CopyNovelClient {
           validateResults: (data) => novelMap(data)['list'] is List,
         ),
       );
+      if (authenticated && revision != sessionRevision) {
+        throw const CopyApiException('账号已切换，已停止旧账号的收藏分页');
+      }
       final list = novelList(page['list']);
       final total = novelInt(page['total'], offset + list.length);
       if (list.isEmpty) {

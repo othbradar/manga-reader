@@ -8,6 +8,7 @@ import '../controllers/session_controller.dart';
 import 'login_page.dart';
 import 'recent_views_page.dart';
 import 'settings_page.dart';
+import 'accounts_page.dart';
 
 class AccountPage extends StatelessWidget {
   const AccountPage({super.key});
@@ -49,7 +50,10 @@ class AccountPage extends StatelessWidget {
                   ),
                 ),
                 if (session.isLoggedIn)
-                  TextButton(onPressed: session.logout, child: const Text('退出'))
+                  TextButton(
+                    onPressed: session.loading ? null : session.logout,
+                    child: const Text('退出'),
+                  )
                 else
                   FilledButton(
                     onPressed: () => _login(context),
@@ -63,6 +67,20 @@ class AccountPage extends StatelessWidget {
         Card(
           child: Column(
             children: [
+              ListTile(
+                leading: const Icon(Icons.switch_account_outlined),
+                title: const Text('切换账号'),
+                subtitle: Text(
+                  session.username.isEmpty
+                      ? '${session.accounts.length} 个本机账号'
+                      : session.username,
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const AccountsPage()),
+                ),
+              ),
+              const Divider(height: 1),
               ListTile(
                 leading: const Icon(Icons.history),
                 title: const Text('最近观看'),

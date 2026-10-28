@@ -4,14 +4,15 @@ import 'package:provider/provider.dart';
 import '../controllers/session_controller.dart';
 
 class LoginPage extends StatefulWidget {
-  const LoginPage({super.key});
+  const LoginPage({super.key, this.username = ''});
+  final String username;
 
   @override
   State<LoginPage> createState() => _LoginPageState();
 }
 
 class _LoginPageState extends State<LoginPage> {
-  final _username = TextEditingController();
+  late final _username = TextEditingController(text: widget.username);
   final _password = TextEditingController();
   bool _obscurePassword = true;
 
@@ -27,6 +28,7 @@ class _LoginPageState extends State<LoginPage> {
       _username.text,
       _password.text,
     );
+    if (mounted) _password.clear();
     if (success && mounted) Navigator.of(context).pop(true);
   }
 
@@ -61,6 +63,7 @@ class _LoginPageState extends State<LoginPage> {
                       const SizedBox(height: 24),
                       TextField(
                         controller: _username,
+                        enabled: !session.loading,
                         autofillHints: const [AutofillHints.username],
                         textInputAction: TextInputAction.next,
                         decoration: const InputDecoration(
@@ -71,6 +74,7 @@ class _LoginPageState extends State<LoginPage> {
                       const SizedBox(height: 14),
                       TextField(
                         controller: _password,
+                        enabled: !session.loading,
                         autofillHints: const [AutofillHints.password],
                         obscureText: _obscurePassword,
                         onSubmitted: (_) => session.loading ? null : _login(),

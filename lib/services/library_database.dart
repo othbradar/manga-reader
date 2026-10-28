@@ -382,8 +382,8 @@ class LibraryDatabase {
       FROM comics c
       LEFT JOIN app_local.comic_details d
         ON d.library_key = ? AND d.comic_uuid = c.comic_uuid
-      LEFT JOIN app_local.favorites_cache f
-        ON f.library_key = ? AND f.comic_uuid = c.comic_uuid
+      LEFT JOIN app_local.$_favoritesTable f
+        ON f.library_key = ? AND f.comic_uuid = c.comic_uuid $_favoritesAccountFilter
       LEFT JOIN app_local.search_index s
         ON s.library_key = ? AND s.comic_uuid = c.comic_uuid
       WHERE (
@@ -398,6 +398,7 @@ class LibraryDatabase {
       [
         libraryKey,
         libraryKey,
+        if (favoritesAccountKey != null) favoritesAccountKey,
         libraryKey,
         normalizedKeyword,
         '%$keyword%',
@@ -409,7 +410,18 @@ class LibraryDatabase {
     return rows.map(Comic.fromDatabase).toList(growable: false);
   }
 
-  Future<List<Comic>> loadFavorites() async {
+  // null reads legacy, unowned caches only for migrations/compatibility.
+  // The application always sets an explicit account key (empty = signed out).
+  String? favoritesAccountKey;
+  String get _favoritesTable => favoritesAccountKey == null
+      ? 'favorites_cache'
+      : 'account_comic_favorites';
+  String get _favoritesAccountFilter =>
+      favoritesAccountKey == null ? '' : ' AND f.account_key = ?';
+
+  Future<List<Comic>> loadFavorites({String? accountKey}) async {
+    final key = accountKey ?? favoritesAccountKey;
+    final table = key == null ? 'favorites_cache' : 'account_comic_favorites';
     final rows = await database.rawQuery(
       '''
       SELECT
@@ -437,14 +449,14 @@ class LibraryDatabase {
           WHERE ch.comic_uuid = f.comic_uuid
             AND ch.archive_relative_path <> ''
         ), 0) AS downloaded_chapters
-      FROM app_local.favorites_cache f
+      FROM app_local.$table f
       LEFT JOIN comics c ON c.comic_uuid = f.comic_uuid
       LEFT JOIN app_local.comic_details d
         ON d.library_key = f.library_key AND d.comic_uuid = f.comic_uuid
-      WHERE f.library_key = ?
+      WHERE f.library_key = ? ${key == null ? '' : 'AND f.account_key = ?'}
       ORDER BY f.position
       ''',
-      [libraryKey],
+      [libraryKey, ?key],
     );
     return rows.map(Comic.fromDatabase).toList(growable: false);
   }
@@ -471,12 +483,17 @@ class LibraryDatabase {
       FROM comics c
       LEFT JOIN app_local.comic_details d
         ON d.library_key = ? AND d.comic_uuid = c.comic_uuid
-      LEFT JOIN app_local.favorites_cache f
-        ON f.library_key = ? AND f.comic_uuid = c.comic_uuid
+      LEFT JOIN app_local.$_favoritesTable f
+        ON f.library_key = ? AND f.comic_uuid = c.comic_uuid $_favoritesAccountFilter
       WHERE c.comic_uuid = ?
       LIMIT 1
       ''',
-      [libraryKey, libraryKey, comicUuid],
+      [
+        libraryKey,
+        libraryKey,
+        if (favoritesAccountKey != null) favoritesAccountKey,
+        comicUuid,
+      ],
     );
     return rows.isEmpty ? null : Comic.fromDatabase(rows.first);
   }
@@ -555,8 +572,15 @@ class LibraryDatabase {
     );
   }
 
-  Future<void> replaceFavorites(List<Comic> favorites) async {
-    await localDatabase.replaceFavorites(libraryKey, favorites);
+  Future<void> replaceFavorites(
+    List<Comic> favorites, {
+    String? accountKey,
+  }) async {
+    await localDatabase.replaceFavorites(
+      libraryKey,
+      favorites,
+      accountKey: accountKey ?? favoritesAccountKey,
+    );
   }
 
   Future<void> cacheChapters(

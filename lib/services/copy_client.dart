@@ -135,12 +135,16 @@ class CopyClient {
   }
 
   Future<List<Comic>> favorites({String ordering = '-datetime_updated'}) async {
+    final revision = sessionRevision;
     const limit = 18;
     var offset = 0;
     var total = 1;
     final comics = <Comic>[];
     final seen = <String>{};
     while (offset < total) {
+      if (revision != sessionRevision) {
+        throw const CopyApiException('账号已切换，已停止旧账号的收藏分页');
+      }
       final results = _asMap(
         await _transport.requestResults(
           CopyApiProtocol.favoritesPath,
@@ -153,6 +157,9 @@ class CopyClient {
           validateResults: (value) => _asMap(value)['list'] is List,
         ),
       );
+      if (revision != sessionRevision) {
+        throw const CopyApiException('账号已切换，已停止旧账号的收藏分页');
+      }
       final list = _asList(results['list']);
       final before = comics.length;
       for (final item in list) {

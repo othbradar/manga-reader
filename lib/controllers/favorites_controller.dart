@@ -13,35 +13,52 @@ class FavoritesController extends ChangeNotifier {
   bool loading = false;
   String error = '';
   List<Comic> comics = const [];
-  (int, String)? _verifiedScope;
-  final Map<(int, String), Future<void>> _reads = {};
+  (int, String, String?)? _verifiedScope;
+  final Map<(int, String, String?), Future<void>> _reads = {};
   bool _changing = false;
   bool _disposed = false;
-  (int, String) get _scope => (client.sessionRevision, database.libraryKey);
+  (int, String, String?) get _scope => (
+    client.sessionRevision,
+    database.libraryKey,
+    database.favoritesAccountKey,
+  );
+
+  void changeAccount(String account) {
+    database.favoritesAccountKey = account;
+    comics = const [];
+    error = '';
+    loading = false;
+    _verifiedScope = null;
+    _notify();
+  }
 
   void _notify() {
     if (!_disposed) notifyListeners();
   }
 
-  void _checkScope((int, String) scope) {
+  void _checkScope((int, String, String?) scope) {
     if (_disposed || scope != _scope) {
       throw const CopyApiException('账号或漫画库已切换，已停止收藏操作');
     }
   }
 
   Future<void> loadCache() async {
-    comics = await database.loadFavorites();
+    final scope = _scope;
+    final loaded = await database.loadFavorites(accountKey: scope.$3);
+    if (_disposed || scope != _scope) return;
+    comics = loaded;
     _notify();
   }
 
   Future<void> refresh() async {
+    final scope = _scope;
     error = '';
     try {
       await _synchronize(force: true);
     } on CopyApiException catch (exception) {
-      error = exception.message;
+      if (scope == _scope) error = exception.message;
     } catch (exception) {
-      error = '收藏刷新失败：$exception';
+      if (scope == _scope) error = '收藏刷新失败：$exception';
     } finally {
       _notify();
     }
@@ -49,6 +66,7 @@ class FavoritesController extends ChangeNotifier {
 
   Future<void> _synchronize({bool force = false}) {
     final scope = _scope;
+    if (scope.$3 == '') throw const CopyApiException('请先登录账号');
     if (!force && _verifiedScope == scope) return Future.value();
     return _reads.putIfAbsent(scope, () async {
       loading = true;
@@ -56,14 +74,19 @@ class FavoritesController extends ChangeNotifier {
       try {
         final remote = await client.favorites();
         _checkScope(scope);
-        await database.replaceFavorites(remote);
-        final loaded = await database.loadFavorites();
+        await database.localDatabase.replaceFavorites(
+          scope.$2,
+          remote,
+          accountKey: scope.$3,
+        );
+        _checkScope(scope);
+        final loaded = await database.loadFavorites(accountKey: scope.$3);
         _checkScope(scope);
         comics = loaded;
         _verifiedScope = scope;
       } finally {
         _reads.remove(scope);
-        loading = _reads.isNotEmpty;
+        loading = _reads.containsKey(_scope);
         _notify();
       }
     });

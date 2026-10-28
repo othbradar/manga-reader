@@ -398,6 +398,9 @@ final class CopyApiTransport {
           formEncoded: formEncoded,
           authenticated: authenticated,
         );
+        if (authenticated && tokenRevision != _tokenRevision) {
+          throw const CopyApiException('账号已切换，已丢弃旧账号的响应');
+        }
         if (validateResults != null && !validateResults(results)) {
           throw _CopyNodeFailure(invalidResultsMessage);
         }

@@ -283,41 +283,57 @@ class NovelFavoritesPage extends StatefulWidget {
 
 class _NovelFavoritesPageState extends State<NovelFavoritesPage> {
   bool _loading = false;
-  String _error = '', _account = '';
+  String _error = '';
+  (int, String, String, bool)? _cacheScope;
+  int _loadRevision = 0;
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final s = context.watch<SessionController>();
-    final ready = context.watch<LibraryController>().ready;
-    if (ready && s.isLoggedIn && s.username != _account) {
-      _account = s.username;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _load(false);
-      });
+    final library = context.watch<LibraryController>();
+    final scope = (
+      s.client.sessionRevision,
+      s.accountKey,
+      library.ready ? library.database.libraryKey : '',
+      library.ready,
+    );
+    if (scope != _cacheScope) {
+      _cacheScope = scope;
+      _loadRevision++;
+      _loading = false;
+      _error = '';
+      if (library.ready && s.isLoggedIn) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && scope == _cacheScope) _load(false);
+        });
+      }
     }
   }
 
   Future<void> _load(bool online) async {
     if (_loading) return;
+    final revision = ++_loadRevision;
     setState(() {
       _loading = true;
       _error = '';
     });
     try {
       await context.read<NovelController>().loadFavorites(
-        context.read<SessionController>().username,
+        context.read<SessionController>().accountKey,
         online: online,
       );
     } catch (e) {
-      _error = e.toString();
+      if (revision == _loadRevision) _error = e.toString();
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && revision == _loadRevision) {
+        setState(() => _loading = false);
+      }
     }
   }
 
   Future<void> _collectLocal({bool retryOnly = false}) async {
     final c = context.read<NovelController>();
-    final account = context.read<SessionController>().username;
+    final account = context.read<SessionController>().accountKey;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -515,9 +531,9 @@ class _NovelDetailPageState extends State<NovelDetailPage> {
                                 _book.pathWord.isNotEmpty,
                             blocked: c.collecting,
                             loadSelected: () =>
-                                c.isCollected(_book, session.username),
+                                c.isCollected(_book, session.accountKey),
                             setSelected: (value) =>
-                                c.favorite(_book, value, session.username),
+                                c.favorite(_book, value, session.accountKey),
                             onLogin: () async {
                               await Navigator.of(context).push<bool>(
                                 MaterialPageRoute(
