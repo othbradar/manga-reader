@@ -56,7 +56,15 @@ class FavoritesPage extends StatelessWidget {
               FilledButton.tonalIcon(
                 onPressed: favorites.loading ? null : favorites.refresh,
                 icon: const Icon(Icons.sync),
-                label: const Text('同步收藏'),
+                label: const Text('刷新收藏'),
+              ),
+              PopupMenuButton<String>(
+                tooltip: '漫画收藏操作',
+                enabled: !favorites.loading,
+                onSelected: (_) => favorites.refresh(checkAll: true),
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: 'all', child: Text('检查全部收藏')),
+                ],
               ),
             ],
           ),

@@ -222,10 +222,25 @@ class _SettingsPageState extends State<SettingsPage> {
                 leading: const Icon(Icons.verified_user_outlined),
                 title: const Text('账号存储'),
                 subtitle: Text(
-                  '多账号登录令牌分别保存在系统安全存储，不保存密码。'
+                  '勾选“记住密码并自动续期”后，密码与令牌分别保存在系统安全存储，'
+                  '不写入 SQLite、漫画库或导出文件。明确过期时自动重新登录一次；'
+                  '网络故障、风控和限流不会触发反复登录。'
+                  '账号菜单可关闭自动续期并忘记密码。'
                   '账号列表与收藏缓存保存在本机数据库，按账号隔离；'
                   '切换账号不改变本地书库、下载任务和阅读记录。'
                   '应用数据导出不包含登录凭据，其他设备需重新登录。',
+                ),
+              ),
+              const Divider(height: 1),
+              const ListTile(
+                leading: Icon(Icons.sync),
+                title: Text('收藏刷新'),
+                subtitle: Text(
+                  '漫画和小说收藏先显示本机历史。刷新按收藏时间检查新增，合并保存，'
+                  '不清空旧列表；首次无缓存时读取全部。新增显示在前，历史相对顺序保留。'
+                  '菜单中的“检查全部收藏”可重新核对全部条目。网络失败不会清空历史，'
+                  '服务器已取消或暂不可见的条目也保留；本机明确取消并确认后才移除。'
+                  '收藏写入另行核实服务器状态，不把历史缓存当作写入成功的证明。',
                 ),
               ),
               const Divider(height: 1),

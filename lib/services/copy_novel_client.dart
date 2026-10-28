@@ -5,6 +5,7 @@ import '../models/novel.dart';
 import 'chinese_search_normalizer.dart';
 import 'copy_api_protocol.dart';
 import 'copy_api_transport.dart';
+import 'favorite_refresh_window.dart';
 
 /// Novel requests share the current transport/node/signature implementation.
 /// Only favorites attach the account token; text and illustrations never do.
@@ -91,10 +92,12 @@ class CopyNovelClient {
     return NovelVolume.fromApi(novelMap(result['volume']), book.uuid);
   }
 
-  Future<List<Novel>> favorites() async => (await _pages(
-    CopyApiProtocol.novelFavoritesPath,
-    authenticated: true,
-  )).map(Novel.fromApi).toList();
+  Future<List<Novel>> favorites({Set<String> knownUuids = const {}}) async =>
+      (await _pages(
+        CopyApiProtocol.novelFavoritesPath,
+        authenticated: true,
+        knownUuids: knownUuids,
+      )).map(Novel.fromApi).toList();
 
   Future<void> setFavorite(Novel book, bool value) async {
     if (book.uuid.isEmpty || book.pathWord.isEmpty || book.isLocal) {
@@ -112,7 +115,9 @@ class CopyNovelClient {
   Future<List<Map<String, dynamic>>> _pages(
     String path, {
     bool authenticated = false,
+    Set<String> knownUuids = const {},
   }) async {
+    final window = FavoriteRefreshWindow(knownUuids);
     final revision = sessionRevision;
     final result = <Map<String, dynamic>>[];
     final seen = <String>{};
@@ -128,7 +133,9 @@ class CopyNovelClient {
           query: CopyApiProtocol.favoritesQuery(
             limit: 18,
             offset: offset,
-            ordering: '-datetime_updated',
+            ordering: knownUuids.isEmpty
+                ? '-datetime_updated'
+                : FavoriteRefreshWindow.ordering,
           ),
           validateResults: (data) => novelMap(data)['list'] is List,
         ),
@@ -143,15 +150,19 @@ class CopyNovelClient {
         break;
       }
       final before = result.length;
+      final pageIds = <String>[];
       for (final item in list) {
         final row = novelMap(item);
         final book = row['book'] is Map ? novelMap(row['book']) : row;
-        final id = novelText(book['id'] ?? book['uuid'] ?? book['path_word']);
+        final id = novelText(book['uuid']);
+        if (id.isEmpty) throw const CopyApiException('小说收藏缺少标识，已保留原收藏缓存');
+        pageIds.add(id);
         if (id.isNotEmpty && seen.add(id)) result.add(row);
       }
       offset += list.length;
       if (offset >= total) break;
       if (result.length == before) throw const CopyApiException('小说目录返回了重复分页');
+      if (window.accept(pageIds, total)) break;
     }
     return result;
   }

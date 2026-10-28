@@ -5,10 +5,16 @@ import '../services/account_store.dart';
 import '../services/copy_client.dart';
 
 class SessionController extends ChangeNotifier {
-  SessionController(this.client, {required this.store});
+  SessionController(this.client, {required this.store}) {
+    client.setSessionRenewal(_renewSavedSession);
+  }
   final CopyClient client;
   final AccountStore store;
   bool loading = false, ready = false;
+  bool renewing = false;
+  bool _disposed = false;
+  final Set<String> _rememberedPasswords = {};
+  bool remembersPassword(String id) => _rememberedPasswords.contains(id);
   String error = '';
   List<SavedAccount> accounts = const [];
   SavedAccount? _active;
@@ -28,6 +34,12 @@ class SessionController extends ChangeNotifier {
         automatic: client.usesAutomaticAuthenticationDomain,
       );
       accounts = await store.list();
+      _rememberedPasswords.clear();
+      for (final account in accounts) {
+        if (await store.remembersPassword(account.id)) {
+          _rememberedPasswords.add(account.id);
+        }
+      }
       final id = await store.activeId();
       final matches = accounts.where((a) => a.id == id);
       if (matches.isNotEmpty) {
@@ -57,7 +69,7 @@ class SessionController extends ChangeNotifier {
   }
 
   Future<bool> _change(Future<void> Function() operation) async {
-    if (loading || !ready) return false;
+    if (loading || renewing || !ready) return false;
     loading = true;
     error = '';
     // Invalidate old in-flight/queued member requests before any async work.
@@ -79,7 +91,11 @@ class SessionController extends ChangeNotifier {
     }
   }
 
-  Future<bool> login(String user, String password) async {
+  Future<bool> login(
+    String user,
+    String password, {
+    bool rememberPassword = false,
+  }) async {
     if (user.trim().isEmpty || password.isEmpty) {
       error = '请输入账号和密码';
       notifyListeners();
@@ -94,7 +110,17 @@ class SessionController extends ChangeNotifier {
       }
       final account = _fromProfile(result, returnedUser);
       final token = result['token']?.toString() ?? '';
-      await store.save(account, token);
+      await store.save(
+        account,
+        token,
+        password: password,
+        rememberPassword: rememberPassword,
+      );
+      if (rememberPassword) {
+        _rememberedPasswords.add(account.id);
+      } else {
+        _rememberedPasswords.remove(account.id);
+      }
       _active = account;
       _activeToken = token;
       accounts = await store.list();
@@ -117,6 +143,7 @@ class SessionController extends ChangeNotifier {
 
   Future<bool> removeAccount(String id) => _change(() async {
     await store.remove(id);
+    _rememberedPasswords.remove(id);
     if (_active?.id == id) {
       _active = null;
       _activeToken = '';
@@ -130,6 +157,7 @@ class SessionController extends ChangeNotifier {
   }
 
   Future<void> saveCurrentNode() async {
+    if (renewing) throw const CopyApiException('正在自动续期，请稍后再切换账号节点');
     final a = _active;
     if (a == null) return;
     final updated = SavedAccount(
@@ -167,5 +195,72 @@ class SessionController extends ChangeNotifier {
     _active = updated;
     accounts = accounts.map((a) => a.id == id ? updated : a).toList();
     notifyListeners();
+  }
+
+  Future<void> forgetPassword(String id) async {
+    if (loading || renewing) return;
+    await store.forgetPassword(id);
+    _rememberedPasswords.remove(id);
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<bool> _renewSavedSession() async {
+    final account = _active;
+    if (_disposed ||
+        loading ||
+        renewing ||
+        account == null ||
+        _activeToken.isEmpty) {
+      return false;
+    }
+    final revision = client.sessionRevision;
+    final domain = client.authenticationDomain;
+    final oldToken = _activeToken;
+    bool unchanged() =>
+        !_disposed &&
+        _active?.id == account.id &&
+        client.sessionRevision == revision &&
+        client.authenticationDomain == domain;
+    renewing = true;
+    notifyListeners();
+    try {
+      final password = await store.password(account.id);
+      if (password.isEmpty || !unchanged()) return false;
+      final result = await client.authenticateCredentials(
+        account.username,
+        password,
+      );
+      if (!unchanged()) return false;
+      final returnedUser = result['username']?.toString().toLowerCase() ?? '';
+      final token = result['token']?.toString() ?? '';
+      if (returnedUser != account.id || token.isEmpty) {
+        throw const CopyApiException('自动续期返回的账号不匹配，未替换原凭证');
+      }
+      await store.saveRenewedToken(account.id, token);
+      if (!unchanged()) {
+        await store.saveRenewedToken(account.id, oldToken);
+        return false;
+      }
+      client.installRenewedToken(token);
+      _activeToken = token;
+      error = '';
+      return true;
+    } on CopyApiException catch (e) {
+      error = '自动续期失败：${e.message}';
+      rethrow;
+    } catch (_) {
+      error = '自动续期未完成，已保留原账号和收藏；请检查安全存储后重新登录';
+      throw CopyApiException(error);
+    } finally {
+      renewing = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    client.setSessionRenewal(null);
+    super.dispose();
   }
 }

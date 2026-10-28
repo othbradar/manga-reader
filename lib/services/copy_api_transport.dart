@@ -77,6 +77,10 @@ final class CopyApiTransport {
   DateTime? _accountRetryNotBefore;
   CopyApiException? _accountRestriction;
   int _tokenRevision = 0;
+  int _credentialRevision = 0;
+  Future<bool> Function()? renewExpiredSession;
+  Future<bool>? _renewal;
+  int? _renewalRevision, _failedRenewalRevision;
   final List<String> _dynamicDomains = <String>[];
   final List<String> _authenticationDomains = <String>[];
   final Map<String, bool> _domainMainland = <String, bool>{};
@@ -149,8 +153,20 @@ final class CopyApiTransport {
 
   void setToken(String token) {
     final value = token.trim();
-    if (_token != value) _tokenRevision++;
+    if (_token != value) {
+      _tokenRevision++;
+      _credentialRevision++;
+    }
     _token = value;
+  }
+
+  /// Rotation of a verified token for the SAME account, not an account switch.
+  void installRenewedToken(String token) {
+    if (_token.isEmpty || token.trim().isEmpty) {
+      throw const CopyApiException('自动续期的账号状态无效');
+    }
+    _token = token.trim();
+    _credentialRevision++;
   }
 
   void setDeviceIdentity(CopyDeviceIdentity identity) => _identity = identity;
@@ -192,6 +208,7 @@ final class CopyApiTransport {
     if (value.isEmpty) {
       throw const CopyApiException('账号 API 域名不能为空');
     }
+    if (value != authenticationDomain) _tokenRevision++;
     _authenticationDomain = value;
     _manualAuthenticationDomain = manual;
     if (!_authenticationDomains.contains(value)) {
@@ -203,6 +220,7 @@ final class CopyApiTransport {
     _manualAuthenticationDomain = false;
     final fastest = _fastestReachableAuthenticationDomain();
     if (fastest != null) {
+      if (fastest != authenticationDomain) _tokenRevision++;
       _authenticationDomain = fastest;
     }
   }
@@ -247,7 +265,17 @@ final class CopyApiTransport {
     bool formEncoded = false,
     CopyApiResultsValidator? validateResults,
     String invalidResultsMessage = '节点返回了空数据',
+    String? candidateToken,
   }) {
+    // Candidate credentials may only be verified by the profile endpoint.
+    // They never replace the current session before server + secure-store checks.
+    if (candidateToken != null &&
+        (path != CopyApiProtocol.profilePath ||
+            !authenticated ||
+            method.toUpperCase() != 'GET' ||
+            candidateToken.trim().isEmpty)) {
+      return Future.error(const CopyApiException('无效的凭证验证请求'));
+    }
     if (authenticated != CopyApiProtocol.requiresAuthentication(path)) {
       return Future.error(const CopyApiException('接口登录凭据配置不匹配，已阻止请求'));
     }
@@ -270,15 +298,23 @@ final class CopyApiTransport {
       formEncoded: formEncoded,
       validateResults: validateResults,
       invalidResultsMessage: invalidResultsMessage,
+      candidateToken: candidateToken,
     );
     if (authenticated || path == CopyApiProtocol.loginPath) {
-      if (authenticated && method.toUpperCase() == 'GET') {
+      Future<dynamic> accountRequest() => _withSessionRenewal(
+        () => _accountRequest(request, authenticated: authenticated),
+        enabled: authenticated && candidateToken == null,
+        readOnly: method.toUpperCase() == 'GET',
+      );
+      if (authenticated &&
+          method.toUpperCase() == 'GET' &&
+          candidateToken == null) {
         final key = jsonEncode([_tokenRevision, path, query]);
         final pending = _accountReads[key];
         if (pending != null) return pending;
         Future<dynamic> read() async {
           try {
-            return await _accountRequest(request, authenticated: true);
+            return await accountRequest();
           } finally {
             _accountReads.remove(key);
           }
@@ -286,9 +322,66 @@ final class CopyApiTransport {
 
         return _accountReads[key] = read();
       }
-      return _accountRequest(request, authenticated: authenticated);
+      return accountRequest();
     }
     return request();
+  }
+
+  Future<dynamic> _withSessionRenewal(
+    Future<dynamic> Function() request, {
+    required bool enabled,
+    required bool readOnly,
+  }) async {
+    final revision = _tokenRevision;
+    final credentialRevision = _credentialRevision;
+    final previousToken = _token;
+    try {
+      return await request();
+    } on CopyApiException catch (error) {
+      if (!enabled ||
+          error.code != 401 ||
+          error.accountRestricted ||
+          _accountRestriction != null ||
+          previousToken.isEmpty ||
+          revision != _tokenRevision ||
+          renewExpiredSession == null) {
+        rethrow;
+      }
+      // This catch is OUTSIDE the serialized account lane: login/profile must
+      // be able to enter that lane without deadlocking the failed request.
+      if (_credentialRevision == credentialRevision) {
+        if (_failedRenewalRevision == revision) rethrow;
+        if (_renewal == null || _renewalRevision != revision) {
+          _renewalRevision = revision;
+          final future = Future<bool>.sync(renewExpiredSession!);
+          _renewal = future;
+        }
+        final pending = _renewal!;
+        var renewed = false;
+        try {
+          renewed = await pending;
+        } finally {
+          if (!renewed) _failedRenewalRevision = revision;
+          if (identical(_renewal, pending)) _renewal = null;
+        }
+        if (!renewed) rethrow;
+      }
+      if (revision != _tokenRevision ||
+          _credentialRevision == credentialRevision) {
+        throw const CopyApiException('账号或节点已切换，已停止旧会话续期');
+      }
+      if (!readOnly) {
+        // Never replay a favorite mutation. UI re-reads the target state first.
+        throw const CopyApiException('登录已自动续期，请重新确认收藏状态后操作');
+      }
+      // One retry only; a second 401 never causes a renewal loop.
+      try {
+        return await request();
+      } on CopyApiException catch (retryError) {
+        if (retryError.code == 401) _failedRenewalRevision = revision;
+        rethrow;
+      }
+    }
   }
 
   // A shared lane for comic/novel favorites and login/profile requests.
@@ -350,9 +443,10 @@ final class CopyApiTransport {
     required bool formEncoded,
     CopyApiResultsValidator? validateResults,
     required String invalidResultsMessage,
+    String? candidateToken,
   }) async {
     _requireIdentity();
-    if (authenticated) _requireLogin();
+    if (authenticated && candidateToken == null) _requireLogin();
     final tokenRevision = _tokenRevision;
     final isLogin = path == CopyApiProtocol.loginPath;
     final Set<String> candidates;
@@ -397,6 +491,7 @@ final class CopyApiTransport {
           data: data,
           formEncoded: formEncoded,
           authenticated: authenticated,
+          candidateToken: candidateToken,
         );
         if (authenticated && tokenRevision != _tokenRevision) {
           throw const CopyApiException('账号已切换，已丢弃旧账号的响应');
@@ -471,6 +566,7 @@ final class CopyApiTransport {
     Map<String, dynamic>? data,
     required bool formEncoded,
     required bool authenticated,
+    String? candidateToken,
   }) async {
     try {
       final isLogin = path == CopyApiProtocol.loginPath;
@@ -480,7 +576,7 @@ final class CopyApiTransport {
         date: _startupDate,
         region: accountRequest ? '0' : _regionForDomain(domain),
         // Login and ALL content endpoints use the logged-out request profile.
-        token: authenticated && !isLogin ? _token : '',
+        token: authenticated && !isLogin ? (candidateToken ?? _token) : '',
       );
       if (isLogin && kDebugMode) {
         debugPrint(
@@ -539,7 +635,14 @@ final class CopyApiTransport {
       }
 
       if (status == 401 && authenticated) {
-        throw const CopyApiException('登录已过期，请重新登录', code: 401);
+        final restricted = _isAccountRestriction(
+          map['message']?.toString() ?? '',
+        );
+        throw CopyApiException(
+          restricted ? map['message'].toString() : '登录已过期，请重新登录',
+          code: 401,
+          accountRestricted: restricted,
+        );
       }
       if (status == 404 || status == 405 || status == 410) {
         throw _CopyNodeFailure(

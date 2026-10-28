@@ -21,6 +21,8 @@ class AccountStore {
   static const legacyUsernameKey = 'copy_manga_username';
   static String tokenKey(String id) =>
       'copy_manga_account_${sha256.convert(utf8.encode(id))}';
+  static String passwordKey(String id) =>
+      'copy_manga_password_${sha256.convert(utf8.encode(id))}';
 
   Future<void> initialize({
     required String domain,
@@ -88,16 +90,40 @@ class AccountStore {
           as String;
   Future<String> token(String id) async =>
       await secure.read(key: tokenKey(id)) ?? '';
+  Future<String> password(String id) async =>
+      await secure.read(key: passwordKey(id)) ?? '';
+  Future<bool> remembersPassword(String id) =>
+      secure.containsKey(key: passwordKey(id));
+  Future<void> forgetPassword(String id) => secure.delete(key: passwordKey(id));
+  Future<void> saveRenewedToken(String id, String token) async {
+    if (token.isEmpty) throw StateError('续期令牌为空');
+    await secure.write(key: tokenKey(id), value: token);
+  }
+
   Future<void> activate(String id) async {
     await local.database.update('account_state', {'active_account': id});
   }
 
-  Future<void> save(SavedAccount account, String token) async {
+  Future<void> save(
+    SavedAccount account,
+    String token, {
+    String? password,
+    bool? rememberPassword,
+  }) async {
     if (token.isEmpty) throw StateError('登录令牌为空');
     final key = tokenKey(account.id);
     final previous = await secure.read(key: key);
-    await secure.write(key: key, value: token);
+    final previousPassword = rememberPassword == null
+        ? null
+        : await this.password(account.id);
     try {
+      await secure.write(key: key, value: token);
+      if (rememberPassword == true) {
+        if (password == null || password.isEmpty) throw StateError('保存的密码为空');
+        await secure.write(key: passwordKey(account.id), value: password);
+      } else if (rememberPassword == false) {
+        await forgetPassword(account.id);
+      }
       await local.database.transaction((txn) async {
         await txn.insert(
           'saved_accounts',
@@ -107,6 +133,16 @@ class AccountStore {
         await txn.update('account_state', {'active_account': account.id});
       });
     } catch (_) {
+      if (rememberPassword != null) {
+        if (previousPassword == null || previousPassword.isEmpty) {
+          await forgetPassword(account.id);
+        } else {
+          await secure.write(
+            key: passwordKey(account.id),
+            value: previousPassword,
+          );
+        }
+      }
       if (previous == null) {
         await secure.delete(key: key);
       } else {
@@ -126,6 +162,7 @@ class AccountStore {
   }
 
   Future<void> remove(String id) async {
+    await forgetPassword(id);
     await secure.delete(key: tokenKey(id));
     await local.database.transaction((txn) async {
       await txn.delete(

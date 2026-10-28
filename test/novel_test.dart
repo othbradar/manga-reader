@@ -65,7 +65,7 @@ class FakeNovels extends CopyNovelClient {
   }
 
   @override
-  Future<List<Novel>> favorites() async {
+  Future<List<Novel>> favorites({Set<String> knownUuids = const {}}) async {
     favoriteReads++;
     return List.of(collected);
   }

@@ -7,6 +7,7 @@ import 'chinese_search_normalizer.dart';
 import 'copy_api_protocol.dart';
 import 'copy_api_transport.dart';
 import 'copy_novel_client.dart';
+import 'favorite_refresh_window.dart';
 
 export 'copy_api_transport.dart' show CopyApiException, CopyApiNode;
 
@@ -75,6 +76,12 @@ class CopyClient {
 
   void setToken(String token) => _transport.setToken(token);
 
+  void setSessionRenewal(Future<bool> Function()? renewal) =>
+      _transport.renewExpiredSession = renewal;
+
+  void installRenewedToken(String token) =>
+      _transport.installRenewedToken(token);
+
   void setDeviceIdentity(CopyDeviceIdentity identity) =>
       _transport.setDeviceIdentity(identity);
 
@@ -100,6 +107,17 @@ class CopyClient {
       _transport.refreshAuthenticationDomains();
 
   Future<Map<String, dynamic>> login(String username, String password) async {
+    final result = await authenticateCredentials(username, password);
+    setToken(result['token']! as String);
+    return result;
+  }
+
+  /// Verify without mutating the current account or recursively renewing it.
+  Future<Map<String, dynamic>> authenticateCredentials(
+    String username,
+    String password,
+  ) async {
+    final revision = sessionRevision;
     final results = await _transport.requestResults(
       CopyApiProtocol.loginPath,
       method: 'POST',
@@ -109,20 +127,26 @@ class CopyClient {
     final map = _asMap(results);
     final token = map['token']?.toString() ?? '';
     if (token.isEmpty) throw const CopyApiException('登录成功但服务器未返回令牌');
-    setToken(token);
-    try {
-      final member = await profile();
-      if (kDebugMode) {
-        debugPrint(
-          '[CopyLogin] token verified by member profile '
-          'profilePresent=${member.isNotEmpty}',
-        );
-      }
-      return <String, dynamic>{...map, ...member, 'token': token};
-    } on Object {
-      setToken('');
-      rethrow;
+    if (revision != sessionRevision) {
+      throw const CopyApiException('账号或节点已切换，已停止旧登录请求');
     }
+    final member = _asMap(
+      await _transport.requestResults(
+        CopyApiProtocol.profilePath,
+        authenticated: true,
+        candidateToken: token,
+      ),
+    );
+    if (revision != sessionRevision) {
+      throw const CopyApiException('账号或节点已切换，未保存旧登录凭证');
+    }
+    if (kDebugMode) {
+      debugPrint(
+        '[CopyLogin] token verified by member profile '
+        'profilePresent=${member.isNotEmpty}',
+      );
+    }
+    return <String, dynamic>{...map, ...member, 'token': token};
   }
 
   Future<Map<String, dynamic>> profile() async {
@@ -134,7 +158,11 @@ class CopyClient {
     );
   }
 
-  Future<List<Comic>> favorites({String ordering = '-datetime_updated'}) async {
+  Future<List<Comic>> favorites({
+    String ordering = '-datetime_updated',
+    Set<String> knownUuids = const {},
+  }) async {
+    final window = FavoriteRefreshWindow(knownUuids);
     final revision = sessionRevision;
     const limit = 18;
     var offset = 0;
@@ -151,7 +179,9 @@ class CopyClient {
           query: CopyApiProtocol.favoritesQuery(
             limit: limit,
             offset: offset,
-            ordering: ordering,
+            ordering: knownUuids.isEmpty
+                ? ordering
+                : FavoriteRefreshWindow.ordering,
           ),
           authenticated: true,
           validateResults: (value) => _asMap(value)['list'] is List,
@@ -162,10 +192,15 @@ class CopyClient {
       }
       final list = _asList(results['list']);
       final before = comics.length;
+      final pageIds = <String>[];
       for (final item in list) {
         final row = _asMap(item);
         final comicData = row['comic'] is Map ? _asMap(row['comic']) : row;
         final comic = Comic.fromApi(comicData, favorite: true);
+        if (comic.uuid.isEmpty) {
+          throw const CopyApiException('漫画收藏缺少标识，已保留原收藏缓存');
+        }
+        pageIds.add(comic.uuid);
         if (comic.uuid.isNotEmpty && seen.add(comic.uuid)) comics.add(comic);
       }
       total = _asInt(results['total'], fallback: comics.length);
@@ -174,6 +209,7 @@ class CopyClient {
           list.isNotEmpty && comics.length == before) {
         throw const CopyApiException('漫画收藏分页不完整，已保留原收藏缓存');
       }
+      if (window.accept(pageIds, total)) break;
     }
     return comics;
   }

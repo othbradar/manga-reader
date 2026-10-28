@@ -310,7 +310,7 @@ class _NovelFavoritesPageState extends State<NovelFavoritesPage> {
     }
   }
 
-  Future<void> _load(bool online) async {
+  Future<void> _load(bool online, {bool checkAll = false}) async {
     if (_loading) return;
     final revision = ++_loadRevision;
     setState(() {
@@ -321,6 +321,7 @@ class _NovelFavoritesPageState extends State<NovelFavoritesPage> {
       await context.read<NovelController>().loadFavorites(
         context.read<SessionController>().accountKey,
         online: online,
+        verify: checkAll,
       );
     } catch (e) {
       if (revision == _loadRevision) _error = e.toString();
@@ -387,14 +388,16 @@ class _NovelFavoritesPageState extends State<NovelFavoritesPage> {
               FilledButton.tonalIcon(
                 onPressed: _loading || c.collecting ? null : () => _load(true),
                 icon: const Icon(Icons.sync),
-                label: const Text('同步收藏'),
+                label: const Text('刷新收藏'),
               ),
               PopupMenuButton<String>(
                 tooltip: '小说收藏操作',
                 enabled: !_loading && !c.collecting,
-                onSelected: (value) =>
-                    _collectLocal(retryOnly: value == 'retry'),
+                onSelected: (value) => value == 'all'
+                    ? _load(true, checkAll: true)
+                    : _collectLocal(retryOnly: value == 'retry'),
                 itemBuilder: (_) => [
+                  const PopupMenuItem(value: 'all', child: Text('检查全部收藏')),
                   const PopupMenuItem(value: 'add', child: Text('收藏本地已匹配小说')),
                   if (c.collectFailures.isNotEmpty)
                     const PopupMenuItem(value: 'retry', child: Text('重试收藏失败')),

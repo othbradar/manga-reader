@@ -31,7 +31,10 @@ class FakeComicClient extends CopyClient {
   int reads = 0, writes = 0;
   bool failWrite = false;
   @override
-  Future<List<Comic>> favorites({String ordering = '-datetime_updated'}) async {
+  Future<List<Comic>> favorites({
+    String ordering = '-datetime_updated',
+    Set<String> knownUuids = const {},
+  }) async {
     reads++;
     return List.of(remote);
   }
@@ -52,7 +55,7 @@ class FakeNovelClient extends CopyNovelClient {
   String? failId;
   int reads = 0;
   @override
-  Future<List<Novel>> favorites() async {
+  Future<List<Novel>> favorites({Set<String> knownUuids = const {}}) async {
     reads++;
     return List.of(remote);
   }

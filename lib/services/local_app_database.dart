@@ -441,6 +441,115 @@ class LocalAppDatabase {
     });
   }
 
+  /// Add/update a refresh prefix without deleting historical favorites.
+  /// All state is device-local; this never modifies the portable library index.
+  Future<void> mergeFavoriteRows({
+    required String table,
+    required String libraryKey,
+    required String? accountKey,
+    required List<Map<String, Object?>> rows,
+    Set<String> confirmedRemoved = const {},
+  }) async {
+    if (!const {
+      'favorites_cache',
+      'account_comic_favorites',
+      'novel_favorites',
+    }.contains(table)) {
+      throw ArgumentError.value(table, 'table');
+    }
+    final idColumn = table == 'novel_favorites' ? 'novel_uuid' : 'comic_uuid';
+    final where =
+        'library_key=?${accountKey == null ? '' : ' AND account_key=?'}';
+    final args = <Object?>[libraryKey, ?accountKey];
+    await database.transaction((txn) async {
+      final previous = await txn.query(table, where: where, whereArgs: args);
+      final byId = {for (final row in previous) row[idColumn] as String: row};
+      var first = previous.fold<int>(
+        0,
+        (min, row) =>
+            (row['position'] as int) < min ? row['position'] as int : min,
+      );
+      final fresh = rows
+          .map((r) => r[idColumn])
+          .toSet()
+          .difference(byId.keys.toSet());
+      first -= fresh.length;
+      for (final row in rows) {
+        final id = row[idColumn] as String;
+        if (id.isEmpty) continue;
+        final old = byId[id];
+        final merged = <String, Object?>{
+          ...?old,
+          'library_key': libraryKey,
+          'account_key': ?accountKey,
+          ...row,
+          'position': old?['position'] ?? first++,
+        };
+        // Sparse list responses must not erase detail text cached previously.
+        for (final key in [
+          'alias',
+          'brief',
+          'cover_url',
+          'authors',
+          'title',
+          'path_word',
+          'status',
+          'last_chapter',
+        ]) {
+          if (merged[key] == '' && old?[key] is String) merged[key] = old![key];
+        }
+        if (old != null && merged.entries.every((e) => old[e.key] == e.value)) {
+          continue;
+        }
+        if (table != 'novel_favorites') {
+          merged['cached_at'] = DateTime.now().toIso8601String();
+        }
+        await txn.insert(
+          table,
+          merged,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      // Only an explicit, server-confirmed uncollect may remove a local entry.
+      for (final id in confirmedRemoved) {
+        await txn.delete(
+          table,
+          where: '$where AND $idColumn=?',
+          whereArgs: [...args, id],
+        );
+      }
+    });
+  }
+
+  Future<void> mergeFavorites(
+    String libraryKey,
+    List<Comic> favorites, {
+    String? accountKey,
+    Set<String> confirmedRemoved = const {},
+  }) => mergeFavoriteRows(
+    table: accountKey == null ? 'favorites_cache' : 'account_comic_favorites',
+    libraryKey: libraryKey,
+    accountKey: accountKey,
+    confirmedRemoved: confirmedRemoved,
+    rows: [
+      for (final comic in favorites)
+        {
+          'comic_uuid': comic.uuid,
+          'path_word': comic.pathWord,
+          'title': comic.title,
+          'authors': comic.authors,
+          'cover_url': comic.coverUrl,
+          'alias': comic.alias,
+          'brief': comic.brief,
+          'status': comic.status,
+          'last_chapter': comic.lastChapter,
+          'source_kind': comic.source.databaseValue,
+          'library_order': comic.libraryOrder,
+          'title_sort_key': comic.titleSortKey,
+        },
+    ],
+  );
+
   Future<List<DownloadTask>> loadDownloadTasks(String libraryKey) async {
     final rows = await database.query(
       'download_tasks',

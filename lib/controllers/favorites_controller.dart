@@ -14,6 +14,7 @@ class FavoritesController extends ChangeNotifier {
   String error = '';
   List<Comic> comics = const [];
   (int, String, String?)? _verifiedScope;
+  Set<String> _remoteUuids = {};
   final Map<(int, String, String?), Future<void>> _reads = {};
   bool _changing = false;
   bool _disposed = false;
@@ -29,6 +30,7 @@ class FavoritesController extends ChangeNotifier {
     error = '';
     loading = false;
     _verifiedScope = null;
+    _remoteUuids = {};
     _notify();
   }
 
@@ -50,11 +52,12 @@ class FavoritesController extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> refresh() async {
+  Future<void> refresh({bool checkAll = false}) async {
+    if (_changing) return;
     final scope = _scope;
     error = '';
     try {
-      await _synchronize(force: true);
+      await _synchronize(force: true, incremental: !checkAll);
     } on CopyApiException catch (exception) {
       if (scope == _scope) error = exception.message;
     } catch (exception) {
@@ -64,17 +67,32 @@ class FavoritesController extends ChangeNotifier {
     }
   }
 
-  Future<void> _synchronize({bool force = false}) {
+  Future<void> _synchronize({
+    bool force = false,
+    bool incremental = false,
+  }) async {
     final scope = _scope;
     if (scope.$3 == '') throw const CopyApiException('请先登录账号');
-    if (!force && _verifiedScope == scope) return Future.value();
+    final ongoing = _reads[scope];
+    if (ongoing != null) {
+      await ongoing;
+      _checkScope(scope);
+      if (incremental || _verifiedScope == scope) return;
+    }
+    if (!force && _verifiedScope == scope) return;
     return _reads.putIfAbsent(scope, () async {
       loading = true;
       _notify();
       try {
-        final remote = await client.favorites();
+        final cached = await database.loadFavorites(accountKey: scope.$3);
         _checkScope(scope);
-        await database.localDatabase.replaceFavorites(
+        final remote = await client.favorites(
+          knownUuids: incremental
+              ? cached.map((c) => c.uuid).toSet()
+              : const {},
+        );
+        _checkScope(scope);
+        await database.localDatabase.mergeFavorites(
           scope.$2,
           remote,
           accountKey: scope.$3,
@@ -83,7 +101,12 @@ class FavoritesController extends ChangeNotifier {
         final loaded = await database.loadFavorites(accountKey: scope.$3);
         _checkScope(scope);
         comics = loaded;
-        _verifiedScope = scope;
+        if (incremental) {
+          _verifiedScope = null;
+        } else {
+          _remoteUuids = remote.map((c) => c.uuid).toSet();
+          _verifiedScope = scope;
+        }
       } finally {
         _reads.remove(scope);
         loading = _reads.containsKey(_scope);
@@ -94,7 +117,7 @@ class FavoritesController extends ChangeNotifier {
 
   Future<bool> isCollected(Comic comic) async {
     await _synchronize();
-    return comics.any((item) => item.uuid == comic.uuid);
+    return _remoteUuids.contains(comic.uuid);
   }
 
   Future<void> setFavorite(Comic comic, bool selected) async {
@@ -110,8 +133,18 @@ class FavoritesController extends ChangeNotifier {
       _checkScope(scope);
       _verifiedScope = null;
       await _synchronize(force: true);
-      if (comics.any((item) => item.uuid == comic.uuid) != selected) {
+      if (_remoteUuids.contains(comic.uuid) != selected) {
         throw const CopyApiException('服务器尚未确认收藏变更，请同步收藏后检查');
+      }
+      if (!selected) {
+        await database.localDatabase.mergeFavorites(
+          scope.$2,
+          const [],
+          accountKey: scope.$3,
+          confirmedRemoved: {comic.uuid},
+        );
+        _checkScope(scope);
+        await loadCache();
       }
     } catch (_) {
       _verifiedScope = null;

@@ -11,7 +11,7 @@ class AccountsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final session = context.watch<SessionController>();
-    final busy = session.loading || !session.ready;
+    final busy = session.loading || session.renewing || !session.ready;
     return Scaffold(
       appBar: AppBar(title: const Text('切换账号')),
       body: ListView(
@@ -60,13 +60,26 @@ class AccountsPage extends StatelessWidget {
                                   LoginPage(username: account.username),
                             ),
                           );
+                        } else if (action == 'forget-password') {
+                          await session.forgetPassword(account.id);
                         } else {
                           await _remove(context, session, account);
                         }
                       },
-                      itemBuilder: (_) => const [
-                        PopupMenuItem(value: 'login', child: Text('重新登录')),
-                        PopupMenuItem(value: 'remove', child: Text('移除本机账号')),
+                      itemBuilder: (_) => [
+                        const PopupMenuItem(
+                          value: 'login',
+                          child: Text('重新登录'),
+                        ),
+                        if (session.remembersPassword(account.id))
+                          const PopupMenuItem(
+                            value: 'forget-password',
+                            child: Text('关闭自动续期并忘记密码'),
+                          ),
+                        const PopupMenuItem(
+                          value: 'remove',
+                          child: Text('移除本机账号'),
+                        ),
                       ],
                     ),
                   ],

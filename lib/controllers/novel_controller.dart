@@ -35,6 +35,7 @@ class NovelController extends ChangeNotifier {
   int collectDone = 0, collectTotal = 0;
   final Map<String, String> collectFailures = {};
   (int, String, String)? _verifiedFavorites;
+  Set<String> _remoteFavoriteUuids = {};
   final Map<(int, String, String), Future<void>> _favoriteReads = {};
   bool _changingFavorite = false;
   String? _activeAccount;
@@ -46,6 +47,7 @@ class NovelController extends ChangeNotifier {
     collectFailures.clear();
     collectDone = collectTotal = 0;
     _verifiedFavorites = null;
+    _remoteFavoriteUuids = {};
     _notify();
   }
 
@@ -182,16 +184,26 @@ class NovelController extends ChangeNotifier {
     return saved;
   }
 
-  Future<void> loadFavorites(String account, {bool online = false}) async {
+  Future<void> loadFavorites(
+    String account, {
+    bool online = false,
+    bool verify = false,
+  }) async {
     final scope = _favoriteScope(account);
     _checkFavoriteScope(scope);
     if (account.isEmpty) return;
     if (online) {
+      final ongoing = _favoriteReads[scope];
+      if (ongoing != null) {
+        await ongoing;
+        _checkFavoriteScope(scope);
+        if (!verify || _verifiedFavorites == scope) return;
+      }
       return _favoriteReads.putIfAbsent(scope, () async {
         try {
-          await _loadFavorites(account, online: true);
+          await _loadFavorites(account, online: true, verify: verify);
           _checkFavoriteScope(scope);
-          _verifiedFavorites = scope;
+          _verifiedFavorites = verify ? scope : null;
         } finally {
           _favoriteReads.remove(scope);
         }
@@ -201,34 +213,46 @@ class NovelController extends ChangeNotifier {
     await _loadFavorites(account);
   }
 
-  Future<void> _loadFavorites(String account, {bool online = false}) async {
+  Future<void> _loadFavorites(
+    String account, {
+    bool online = false,
+    bool verify = false,
+  }) async {
     final scope = _favoriteScope(account);
     final key = store.key;
     if (online) {
-      final remote = await client.favorites();
+      final cached = await local.query(
+        'novel_favorites',
+        columns: ['novel_uuid'],
+        where: 'library_key=? AND account_key=?',
+        whereArgs: [key, account],
+      );
       _checkFavoriteScope(scope);
-      await local.transaction((txn) async {
-        await txn.delete(
-          'novel_favorites',
-          where: 'library_key=? AND account_key=?',
-          whereArgs: [key, account],
-        );
-        for (final (i, b) in remote.indexed) {
-          if (b.uuid.isEmpty) continue;
-          await txn.insert('novel_favorites', {
-            'library_key': key,
-            'account_key': account,
-            'novel_uuid': b.uuid,
-            'path_word': b.pathWord,
-            'title': b.title,
-            'authors': b.authors,
-            'alias': b.alias,
-            'brief': b.brief,
-            'cover_url': b.coverUrl,
-            'position': i,
-          });
-        }
-      });
+      final remote = await client.favorites(
+        knownUuids: verify
+            ? const {}
+            : cached.map((r) => r['novel_uuid'] as String).toSet(),
+      );
+      _checkFavoriteScope(scope);
+      await store.library.localDatabase.mergeFavoriteRows(
+        table: 'novel_favorites',
+        libraryKey: key,
+        accountKey: account,
+        rows: [
+          for (final b in remote)
+            {
+              'novel_uuid': b.uuid,
+              'path_word': b.pathWord,
+              'title': b.title,
+              'authors': b.authors,
+              'alias': b.alias,
+              'brief': b.brief,
+              'cover_url': b.coverUrl,
+            },
+        ],
+      );
+      _checkFavoriteScope(scope);
+      if (verify) _remoteFavoriteUuids = remote.map((b) => b.uuid).toSet();
     }
     final loaded = (await local.query(
       'novel_favorites',
@@ -243,9 +267,9 @@ class NovelController extends ChangeNotifier {
 
   Future<bool> isCollected(Novel book, String account) async {
     if (_verifiedFavorites != _favoriteScope(account)) {
-      await loadFavorites(account, online: true);
+      await loadFavorites(account, online: true, verify: true);
     }
-    return favorites.any((b) => b.uuid == book.uuid);
+    return _remoteFavoriteUuids.contains(book.uuid);
   }
 
   Future<void> favorite(Novel book, bool selected, String account) async {
@@ -261,9 +285,20 @@ class NovelController extends ChangeNotifier {
       await client.setFavorite(book, selected);
       _checkFavoriteScope(scope);
       _verifiedFavorites = null;
-      await loadFavorites(account, online: true);
-      if (favorites.any((b) => b.uuid == book.uuid) != selected) {
+      await loadFavorites(account, online: true, verify: true);
+      if (_remoteFavoriteUuids.contains(book.uuid) != selected) {
         throw const CopyApiException('服务器尚未确认收藏变更，请同步收藏后检查');
+      }
+      if (!selected) {
+        await store.library.localDatabase.mergeFavoriteRows(
+          table: 'novel_favorites',
+          libraryKey: scope.$2,
+          accountKey: account,
+          rows: const [],
+          confirmedRemoved: {book.uuid},
+        );
+        _checkFavoriteScope(scope);
+        await _loadFavorites(account);
       }
     } catch (_) {
       _verifiedFavorites = null;
@@ -293,9 +328,9 @@ class NovelController extends ChangeNotifier {
     _notify();
     final attempted = <String>{};
     try {
-      await loadFavorites(account, online: true);
+      await loadFavorites(account, online: true, verify: true);
       _checkFavoriteScope(scope);
-      final remote = favorites.map((b) => b.uuid).toSet();
+      final remote = Set.of(_remoteFavoriteUuids);
       final candidates = (await store.books())
           .where(
             (b) =>
@@ -327,8 +362,8 @@ class NovelController extends ChangeNotifier {
         await Future<void>.delayed(const Duration(milliseconds: 350));
       }
       _checkFavoriteScope(scope);
-      await loadFavorites(account, online: true);
-      final verified = favorites.map((b) => b.uuid).toSet();
+      await loadFavorites(account, online: true, verify: true);
+      final verified = _remoteFavoriteUuids;
       collectFailures.removeWhere((uuid, _) => verified.contains(uuid));
       for (final b in candidates) {
         if (attempted.contains(b.uuid) && !verified.contains(b.uuid)) {

@@ -7,6 +7,7 @@ import 'package:copymanga_reader/controllers/novel_controller.dart';
 import 'package:copymanga_reader/models/comic.dart';
 import 'package:copymanga_reader/models/novel.dart';
 import 'package:copymanga_reader/pages/accounts_page.dart';
+import 'package:copymanga_reader/pages/login_page.dart';
 import 'package:copymanga_reader/services/account_store.dart';
 import 'package:copymanga_reader/services/copy_client.dart';
 import 'package:copymanga_reader/services/copy_novel_client.dart';
@@ -24,6 +25,35 @@ class AccountClient extends CopyClient {
   String activeToken = '';
   String? failure, returnedUsername;
   int logins = 0, profiles = 0;
+  int renewals = 0;
+  Future<bool> Function()? renewal;
+  Completer<void>? renewalHold;
+  @override
+  void setSessionRenewal(Future<bool> Function()? callback) {
+    renewal = callback;
+    super.setSessionRenewal(callback);
+  }
+
+  @override
+  Future<Map<String, dynamic>> authenticateCredentials(
+    String username,
+    String password,
+  ) async {
+    renewals++;
+    if (renewalHold != null) await renewalHold!.future;
+    if (failure != null) throw CopyApiException(failure!);
+    return {
+      'username': returnedUsername ?? username,
+      'token': 'renewed-fixture-$username',
+    };
+  }
+
+  @override
+  void installRenewedToken(String token) {
+    activeToken = token;
+    super.installRenewedToken(token);
+  }
+
   Completer<void>? hold;
   Completer<List<Comic>>? comicRead;
   @override
@@ -54,6 +84,7 @@ class AccountClient extends CopyClient {
   @override
   Future<List<Comic>> favorites({
     String ordering = '-datetime_updated',
+    Set<String> knownUuids = const {},
   }) async => comicRead == null ? [] : comicRead!.future;
 }
 
@@ -61,7 +92,8 @@ class HeldNovelClient extends CopyNovelClient {
   HeldNovelClient() : super(CopyApiTransport(), null);
   final held = Completer<List<Novel>>();
   @override
-  Future<List<Novel>> favorites() => held.future;
+  Future<List<Novel>> favorites({Set<String> knownUuids = const {}}) =>
+      held.future;
 }
 
 void main() {
@@ -172,6 +204,63 @@ void main() {
     } finally {
       await legacy.close();
     }
+  });
+
+  test('记住密码仅写系统安全存储，续期不改变当前账号或收藏作用域', () async {
+    await session.login('second', 'fixture-password', rememberPassword: true);
+    expect(await store.password('second'), 'fixture-password');
+    expect(session.remembersPassword('second'), isTrue);
+    expect(
+      (await local.database.query('saved_accounts')).toString(),
+      isNot(contains('fixture-password')),
+    );
+    final revision = client.sessionRevision;
+    final id = session.accountKey;
+    expect(await client.renewal!(), isTrue);
+    expect(client.renewals, 1);
+    expect(client.sessionRevision, revision);
+    expect(session.accountKey, id);
+    expect(await store.token('second'), 'renewed-fixture-second');
+    expect(await store.token('original'), 'original-fixture-token');
+    expect(await store.activeId(), 'second');
+  });
+
+  test('没有保存密码不自动登录；关闭续期和退出删除密码但保留收藏', () async {
+    expect(await client.renewal!(), isFalse);
+    expect(client.renewals, 0);
+    await session.login('second', 'fixture-password', rememberPassword: true);
+    await session.forgetPassword('second');
+    expect(await store.password('second'), isEmpty);
+    expect(await store.token('second'), isNotEmpty);
+    expect(await client.renewal!(), isFalse);
+    await session.login('second', 'fixture-password', rememberPassword: true);
+    await session.removeAccount('second');
+    expect(await store.password('second'), isEmpty);
+    expect(await store.token('original'), 'original-fixture-token');
+  });
+
+  test('自动续期拒绝错误身份，失败保留旧令牌与保存密码', () async {
+    await session.login('second', 'fixture-password', rememberPassword: true);
+    client.returnedUsername = 'someone-else';
+    await expectLater(client.renewal!(), throwsA(isA<CopyApiException>()));
+    expect(await store.token('second'), 'test-token-second');
+    expect(client.activeToken, 'test-token-second');
+    expect(await store.password('second'), 'fixture-password');
+    expect(session.renewing, isFalse);
+  });
+
+  test('续期期间禁止账号突变，节点改变后旧结果不覆盖安全存储', () async {
+    await session.login('second', 'fixture-password', rememberPassword: true);
+    client.renewalHold = Completer<void>();
+    final renewing = client.renewal!();
+    await Future<void>.delayed(Duration.zero);
+    expect(session.renewing, isTrue);
+    expect(await session.switchAccount('original'), isFalse);
+    client.setAuthenticationDomain('changed.example');
+    client.renewalHold!.complete();
+    expect(await renewing, isFalse);
+    expect(await store.token('second'), 'test-token-second');
+    expect(session.accountKey, 'second');
   });
 
   test('切换使用各自令牌与账号节点，不重登，不切换匿名内容线路', () async {
@@ -305,7 +394,7 @@ void main() {
   });
 
   test('跨设备应用备份包含分账号收藏，不包含账号列表/活动账号/令牌', () async {
-    await session.login('second', 'fixture-password');
+    await session.login('second', 'fixture-password', rememberPassword: true);
     await local.replaceFavorites(library.libraryKey, [
       const Comic(uuid: 'a', pathWord: 'a', title: 'A', authors: ''),
     ], accountKey: 'original');
@@ -317,6 +406,10 @@ void main() {
     )).map((r) => r['name']);
     expect(tables, isNot(contains('saved_accounts')));
     expect(tables, isNot(contains('account_state')));
+    expect(
+      String.fromCharCodes(await file.readAsBytes()),
+      isNot(contains('fixture-password')),
+    );
     expect(
       (await backup.query('account_comic_favorites')).single['account_key'],
       'original',
@@ -344,5 +437,26 @@ void main() {
     expect(find.text('重新登录'), findsOneWidget);
     expect(find.text('移除本机账号'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('窄屏登录页默认记住密码，可取消且不溢出', (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: session,
+        child: const MaterialApp(home: LoginPage()),
+      ),
+    );
+    final checkbox = find.byType(CheckboxListTile);
+    expect(tester.widget<CheckboxListTile>(checkbox).value, isTrue);
+    await tester.ensureVisible(checkbox);
+    await tester.tap(checkbox);
+    await tester.pump();
+    expect(tester.widget<CheckboxListTile>(checkbox).value, isFalse);
+    expect(tester.takeException(), isNull);
+    expect(client.logins, 0);
   });
 }
